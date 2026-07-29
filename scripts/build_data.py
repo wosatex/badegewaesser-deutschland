@@ -916,22 +916,124 @@ def konnektor_nw() -> list[dict]:
     raise NotImplementedError("Tabellenansicht auswerten")
 
 
+NI_BASIS = "https://www.apps.nlga.niedersachsen.de/batlas/index.php"
+
+# Generische Kommentare, die auf den Messwert-Seiten praktisch jede Zeile
+# füllen und keine eigenständige Information sind (nichts Auffälliges).
+NI_GENERISCHER_KOMMENTAR = re.compile(
+    r"keine auff|k\.?\s?a\.?$|^-?$", re.I)
+
+
 def konnektor_ni() -> list[dict]:
     """
-    [TODO] apps.nlga.niedersachsen.de/batlas/ — das beste Scraping-Ziel.
-    URL-Schema ist vollständig deterministisch:
-        index.php?p=sa                 Liste aller Badestellen (IDs holen)
-        index.php?p=bm&b=<EU-ID>       Messdaten
-        index.php?p=bw&b=<EU-ID>       Profil
-    Kein Session-Handling, kein JS nötig.
+    Niedersachsen, 275 Badestellen. apps.nlga.niedersachsen.de existiert
+    NICHT (DNS-Fehler) — die echte Domain hat ein "www." davor:
+    www.apps.nlga.niedersachsen.de. URL-Schema sonst wie vermutet:
+        index.php?p=sa            Liste aller Badestellen, EU-ID direkt im
+                                   href (kein zweiter Request pro ID nötig)
+        index.php?p=bm&b=<EU-ID>  Messdaten, HTML-Tabelle je Jahr
+        index.php?p=ha            "Aktuelle Meldungen": Badeverbote + Hinweise
+                                   in einer einzigen Liste, kein Scrapen pro
+                                   Stelle nötig
 
-    Vorher den Menüpunkt "Downloads" im batlas prüfen — evtl. liegen die Daten
-    dort fertig als Datei und der Scraper erübrigt sich.
+    "Downloads" (index.php?p=id) geprüft: nur PDFs (Verordnung, Glossar,
+    EUA-Jahresberichte), keine Datenexporte. Das dort verlinkte
+    "schnittstelle_eu_badegewaesser.pdf" beschreibt nur die Upload-
+    Schnittstelle der Gesundheitsämter ans NLGA, keine Abfrage-API für uns.
 
-    Rechtlich: Messwerte sind Fakten und unproblematisch. Fotos und
-    Profiltexte NICHT übernehmen, die stehen unter "Alle Rechte vorbehalten".
+    Die EU-IDs (DENI_PR_TK25_....) sind identisch mit der EEA-Basis — anders
+    als bei HH/BE keine Koordinaten- oder Namenszuordnung nötig, direkter
+    Merge über die ID.
+
+    Messwerttabelle: Datum ist zweistelliges Jahr (DD.MM.JJ) — alle Belege
+    seit 2008, also unzweideutig 20xx. Über alle Jahres-Reiter einer Seite
+    hinweg wird die Zeile mit dem spätesten Datum genommen (nicht einfach
+    die erste Tabelle - falls die laufende Saison noch keine Probe hat).
+
+    hinweise: Badeverbote aus index.php?p=ha → art=warnung. Der Kommentar
+    der jeweils letzten Messung wird nur übernommen, wenn er über die
+    generische Floskel ("... ergab keine Auffälligkeiten", "k. A.")
+    hinausgeht → art=zustand.
+
+    Fotos und Profiltexte werden NICHT übernommen (Alle Rechte vorbehalten,
+    Niedersachsen selbst weist im Docstring der Vorgabe darauf hin) - nur
+    Messwerte und der amtliche Verweislink.
     """
-    raise NotImplementedError("batlas-Scraper bauen")
+    r = hole(NI_BASIS, params={"p": "sa"})
+    text = r.content.decode("utf-8")
+    stellen_liste = re.findall(
+        r'<a href="index\.php\?p=b[a-z]&amp;b=(DENI_PR_TK25_\d+_\d+)">([^<]+)</a>', text)
+    if len(stellen_liste) < 100:
+        raise ValueError(f"NI: nur {len(stellen_liste)} Badestellen in der Liste gefunden")
+
+    r = hole(NI_BASIS, params={"p": "ha"})
+    meldungen = r.content.decode("utf-8")
+    badeverbote = set(re.findall(
+        r'<a href="\?p=b[a-z]&amp;b=(DENI_PR_TK25_\d+_\d+)">', meldungen))
+
+    def zahl(v: str):
+        try:
+            return float(str(v).replace(",", ".").replace("<", "").replace(">", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def probedatum(v: str) -> str | None:
+        m = re.match(r"(\d{2})\.(\d{2})\.(\d{2})", v or "")
+        return f"20{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
+    zeile_re = re.compile(
+        r'<td[^>]*>(\d{2}\.\d{2}\.\d{2})</td>\s*'
+        r'<td[^>]*>([^<]*)</td>\s*'
+        r'<td[^>]*>([^<]*)</td>\s*'
+        r'<td[^>]*>([^<]*)</td>\s*'
+        r'<td[^>]*>([^<]*)</td>\s*'
+        r'<td[^>]*>([\s\S]*?)</td>')
+
+    out = []
+    for i, (sid, name) in enumerate(stellen_liste):
+        if i:
+            time.sleep(0.3)
+        try:
+            r = hole(NI_BASIS, params={"p": "bm", "b": sid})
+        except Exception:
+            continue
+        seite = r.content.decode("utf-8")
+
+        zeilen = zeile_re.findall(seite)
+        if not zeilen:
+            continue
+        letzte = max(zeilen, key=lambda z: probedatum(z[0]) or "")
+
+        datum, ecoli_s, entero_s, temp_s, sicht_s, kommentar = letzte
+        kommentar = re.sub(r"<[^>]*>", " ", kommentar)
+        kommentar = re.sub(r"\s+", " ", kommentar).strip()
+        ecoli, entero = zahl(ecoli_s), zahl(entero_s)
+
+        eigener_kommentar = kommentar and not NI_GENERISCHER_KOMMENTAR.search(kommentar)
+        hinweise = []
+        if sid in badeverbote:
+            # Der Kommentar hängt an der letzten Zahlenmessung, das Badeverbot
+            # kann aus einem separaten Anlass (z.B. Sichtbefund) stammen -
+            # nur übernehmen, wenn er wirklich etwas aussagt, sonst ein
+            # neutrales Label statt eines widersprüchlichen "unauffällig".
+            text = kommentar if eigener_kommentar else "Amtliches Badeverbot (Grund siehe Verweislink)"
+            hinweise.append({"art": "warnung", "text": text})
+        elif eigener_kommentar:
+            hinweise.append({"art": "zustand", "text": kommentar})
+
+        out.append(stelle(
+            "NI", sid, html.unescape(name).strip(),
+            vertrauen="berechnet" if (ecoli is not None and entero is not None) else "jahresnote",
+            probe=probedatum(datum),
+            ecoli=ecoli, entero=entero,
+            temperatur=zahl(temp_s), sichttiefe=zahl(sicht_s),
+            hinweise=hinweise,
+            url=f"{NI_BASIS}?p=bm&b={sid}",
+        ))
+
+    if len(out) < 100:
+        raise ValueError(f"NI: nur {len(out)} Badestellen mit Messwerten gelesen")
+    return out
 
 
 def konnektor_rp() -> list[dict]:
