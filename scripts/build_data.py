@@ -512,38 +512,73 @@ ST_REST = ("https://www.geodatenportal.sachsen-anhalt.de/arcgis/rest/services/"
 
 def konnektor_st() -> list[dict]:
     """
-    [PRUEF] Sachsen-Anhalt. Der dokumentierte WMS liegt unter
-    /arcgis/services/LAV/Badegewaesser_LSA/MapServer/WMSServer — derselbe Dienst
-    ist bei ArcGIS fast immer auch unter /arcgis/rest/services/... als REST-
-    Endpunkt erreichbar. Laut Metadatensatz enthält er neueste
-    Untersuchungsergebnisse, letzte Qualitätseinstufung und aktuelle Hinweise,
-    also genau das gesuchte Feld-Set.
+    Sachsen-Anhalt, 70 Badestellen. Layer-Index war falsch geraten (0 statt 1
+    - ArcGIS-Layer-IDs sind hier NICHT lückenlos ab 0 durchnummeriert: 1
+    "Badegewässer" (Punkte, verwendet), 2 "Badegewässerflächen ALKIS"
+    (Polygone), 3 "Aktuelle Meldungen"). Feldnamen waren komplett geraten
+    (badegewaesserid/name/gewaesser/gemeinde/einstufung/hinweis existieren
+    nicht); echte Felder unten, bestätigt gegen die Live-Antwort.
+
+    BGW_NR (z.B. "0033") ist NICHT die volle amtliche ID, sondern nur die
+    laufende Nummer darin - zusammengesetzt wird DEST_PR_<BGW_NR>, geprüft
+    gegen die EEA-Basis (BGW_NR 0033 == DEST_PR_0033 == "Kulk Gommern").
+
+    WARNUNG ist "Baden verboten" (echtes Badeverbot, z.B. Blaualgen) oder
+    "Information" (schwächerer Hinweis) oder leer. AUFHEBUNG/AUFHEBUNG_DATUM
+    werden defensiv geprüft, auch wenn im aktuellen Bestand nie befüllt -
+    ein aufgehobener Hinweis soll nicht als aktive Warnung durchgereicht
+    werden, falls der Dienst das Feld doch mal nutzt.
     """
-    r = hole(f"{ST_REST}/0/query", params={
+    r = hole(f"{ST_REST}/1/query", params={
         "where": "1=1", "outFields": "*", "returnGeometry": "true",
         "outSR": "4326", "f": "geojson",
     })
     gj = r.json()
 
+    def zahl(v):
+        try:
+            return float(str(v).replace(",", ".").replace("<", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def probedatum(v: str) -> str | None:
+        m = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", v or "")
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
     out = []
-    for i, feat in enumerate(gj.get("features", [])):
-        p = {k.lower(): v for k, v in (feat.get("properties") or {}).items()}
+    for feat in gj.get("features", []):
+        p = feat.get("properties") or {}
         c = (feat.get("geometry") or {}).get("coordinates") or [None, None]
+        bgw_nr = p.get("BGW_NR")
+        if not bgw_nr:
+            continue
+
+        ecoli = zahl(p.get("ESCHERICHIA_COLI"))
+        entero = zahl(p.get("ENTEROKOKKEN"))
+        qualitaet = p.get("QUALITÄT")
+
         hinweise = []
-        if p.get("hinweis"):
-            hinweise.append({"art": "zustand", "text": str(p["hinweis"])})
+        warnung = p.get("WARNUNG")
+        if warnung and not p.get("AUFHEBUNG"):
+            hinweise.append({
+                "art": "warnung" if warnung == "Baden verboten" else "zustand",
+                "text": p.get("BEMERKUNG_WARNUNG") or warnung,
+            })
 
         out.append(stelle(
-            "ST", p.get("badegewaesserid") or f"DEST_{i:04d}",
-            p.get("name") or p.get("badegewaesser") or f"Badegewässer {i}",
-            gewaesser=p.get("gewaesser"), ort=p.get("gemeinde"),
+            "ST", f"DEST_PR_{bgw_nr}", p.get("GEWAESSER") or bgw_nr,
+            ort=p.get("LANDKREIS"),
             lat=c[1], lon=c[0],
-            vertrauen="amtlich",
-            einstufung=p.get("einstufung"),
-            probe=p.get("probedatum") or p.get("datum"),
+            vertrauen="berechnet" if (ecoli is not None and entero is not None)
+                      else ("amtlich" if qualitaet else "jahresnote"),
+            einstufung=qualitaet,
+            ampel=einstufung_ampel(qualitaet),
+            probe=probedatum(p.get("DATUM")),
+            ecoli=ecoli, entero=entero,
+            temperatur=zahl(p.get("ENTNAHMETEMPERATUR")),
+            sichttiefe=zahl(p.get("SICHTTIEFE")),
             hinweise=hinweise,
-            url="https://www.geodatenportal.sachsen-anhalt.de/mapapps/"
-                "resources/apps/badegewaesserkarte/index.html",
+            url=p.get("LINK"),
         ))
     return out
 
