@@ -1696,8 +1696,33 @@ def konnektor_sn() -> list[dict]:
 
 
 def konnektor_th() -> list[dict]:
-    """[TODO] verbraucherschutz.thueringen.de/gesundheit/badegewaesser. Nur 38 Badestellen."""
-    raise NotImplementedError()
+    """
+    [TODO] Thüringen, 39 Badestellen — echtes Hindernis, kein Feldnamen-Fix.
+
+    verbraucherschutz.thueringen.de/umwelthygiene (und die Kurz-URL twisth.de,
+    die dorthin redirected) liefert nur eine Link11-CAPTCHA-Seite
+    (<title>Link11 - CAPTCHA</title>, HTTP 200). CAPTCHAs umgehen ist mir
+    ausdrücklich untersagt - das ist keine Bastelaufgabe, sondern ein Stopp.
+
+    twisth.thueringen.de (andere Subdomain, dieselbe Anwendung) ist NICHT
+    hinter Link11: .../badegewaesser/profil/<ID>.pdf liefert direkt ein PDF
+    (geprüft mit ID 579 = Bebraer Teiche, DETH_PR_0061 laut EEA-Basis). Aber:
+    dieses PDF ist das statische "Badegewässerprofil" (allgemeine Beschreibung,
+    zuletzt 2022 aktualisiert) - keine aktuellen Messwerte. Die eigentliche
+    Datenanwendung dahinter (.../api/badegewaesser) redirectet auf denselben
+    CAPTCHA-Host, also auch kein Umweg über eine API.
+
+    Ohne aktuelle Keimzahlen bringt ein Konnektor hier nur die ohnehin schon
+    vorhandenen EEA-Stammdaten (Name/Koordinaten/Jahresnote) - kein
+    Mehrwert, der einen eigenen Konnektor rechtfertigt. Falls sich das
+    ändert (z.B. ein Kontakt bei der Behörde, der eine IP-Freischaltung
+    anbietet), wäre der Rest einfach: PDF-IDs laufen 1..~800 durch, im PDF
+    steht die EEA-ID im Klartext ("ID Nummer (ab 2008 neu von EU)").
+    """
+    raise NotImplementedError(
+        "Link11-CAPTCHA vor der eigentlichen Datenanwendung, kein Umweg "
+        "gefunden - PDF-Profile sind statisch, keine Messwerte (Details im Docstring)."
+    )
 
 
 def konnektor_hb() -> list[dict]:
