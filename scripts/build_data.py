@@ -1725,15 +1725,110 @@ def konnektor_th() -> list[dict]:
     )
 
 
+HB_UEBERSICHT = ("https://umwelt.bremen.de/umwelt/wasser/baden-in-bremen/"
+                 "aktuelle-temperaturen-der-badegewaesser-48224")
+
+
 def konnektor_hb() -> list[dict]:
     """
-    [TODO] umwelt.bremen.de + transparenz.bremen.de.
-    10 Badeseen + 1 Weser-Badestelle, Wassertemperatur wöchentlich.
-    Dunger See, Grambker Feldmarksee und Kuhgrabensee sind aus Naturschutz-
-    gründen grundsätzlich gesperrt -> als Warnhinweis setzen.
-    Bremerhaven ist hier NICHT enthalten, separat prüfen.
+    Bremen, 11 Badestellen (10 Seen + Weser Cafe Sand). Kein interaktiver
+    Kartendienst wie in anderen Ländern - die Übersichtsseite ist eine
+    einfache, serverseitig gerenderte HTML-Tabelle (Gewässer, Temperatur,
+    freigegeben/gesperrt, Bemerkung, Datum), pro Zeile ein Link auf eine
+    Detailseite je Badestelle.
+
+    WICHTIG: Echte E. coli/Enterokokken-Werte gibt es NICHT als Text/JSON,
+    nur als serverseitig gerendertes Diagrammbild
+    (messdaten-hub.bremen.de/kogis/webdiagramme/<ID>.jpg) - dahinter liegt
+    keine erreichbare JSON/CSV-Variante (geprüft, .json/.csv/.xml/.data
+    liefern 404, das Verzeichnis selbst 403). Zahlen aus einem Diagrammbild
+    lesen hieße raten, nicht messen - deshalb vertrauen bleibt "amtlich",
+    nie "berechnet", genau wie bei BB.
+
+    Die Bilddatei-ID im Dateinamen ist zufällig die EEA-Nummer ohne
+    "DEHB_PR_"-Präfix (geprüft: Achterdieksee -> 9002-1000.jpg -> DEHB_PR_9002,
+    Weser Cafe Sand -> 1000--365.jpg -> DEHB_PR_1000) - zuverlässiger als
+    Namensabgleich, deshalb daraus die ID gebaut statt aus dem Seitennamen.
+
+    Die Einstufung (ausgezeichnet/gut/ausreichend/mangelhaft) steht im
+    alt-Text des Vorschaubilds auf der Detailseite im Klartext.
+
+    Dunger See, Grambker Feldmarksee und Kuhgrabensee (dauerhaft gesperrt,
+    laut docstring-Vorgabe aus Naturschutzgründen) tauchen in der
+    Temperaturtabelle NICHT auf - offenbar keine EU-Badestellen im engeren
+    Sinn, nicht Teil dieser Quelle. Bremerhaven ist ebenfalls nicht
+    enthalten (eigene Zuständigkeit, separat zu prüfen).
     """
-    raise NotImplementedError()
+    r = hole(HB_UEBERSICHT)
+    text = r.content.decode("utf-8")
+    zeilen_voll = [tr for tr in re.findall(r"<tr>([\s\S]*?)</tr>", text) if "detail.php" in tr]
+    if len(zeilen_voll) < 5:
+        raise ValueError(f"HB: nur {len(zeilen_voll)} Badestellen in der Übersicht gefunden")
+
+    def zelle(tr_text: str, index: int) -> str:
+        tds = re.findall(r'<td class="dotright">([\s\S]*?)</td>', tr_text)
+        if index >= len(tds):
+            return ""
+        return html.unescape(re.sub(r"<[^>]*>", " ", tds[index])).strip()
+
+    def zahl(v: str):
+        try:
+            return float(str(v).replace(",", ".").replace("°C", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def probedatum(v: str) -> str | None:
+        m = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", v or "")
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
+    out = []
+    for i, tr in enumerate(zeilen_voll):
+        link_m = re.search(r'<a href="([^"]*detail\.php[^"]*)">([^<]*)</a>', tr)
+        if not link_m:
+            continue
+        url, name = link_m.group(1), html.unescape(link_m.group(2)).strip()
+        if i:
+            time.sleep(0.3)
+
+        temp = zahl(zelle(tr, 1))
+        status = zelle(tr, 2).lower()
+        bemerkung = zelle(tr, 3)
+        datum = probedatum(zelle(tr, 4))
+
+        try:
+            seite = hole(url).content.decode("utf-8")
+        except Exception:
+            continue
+        bild_m = re.search(r"webdiagramme/(\d+)", seite)
+        if not bild_m:
+            continue
+        eu_id = f"DEHB_PR_{bild_m.group(1)}"
+
+        einstufung = None
+        alt_m = re.search(r'ist als (\w+) eingestuft', seite)
+        if alt_m:
+            einstufung = alt_m.group(1).lower()
+
+        hinweise = []
+        if "gesperrt" in status:
+            hinweise.append({"art": "warnung", "text": bemerkung or "Badestelle gesperrt"})
+        elif bemerkung:
+            hinweise.append({"art": "warnung", "text": bemerkung})
+
+        out.append(stelle(
+            "HB", eu_id, name,
+            vertrauen="amtlich",
+            einstufung=einstufung,
+            ampel=einstufung_ampel(einstufung),
+            probe=datum,
+            temperatur=temp,
+            hinweise=hinweise,
+            url=url,
+        ))
+
+    if len(out) < 5:
+        raise ValueError(f"HB: nur {len(out)} Stellen zusammengebaut")
+    return out
 
 
 def konnektor_sl() -> list[dict]:
