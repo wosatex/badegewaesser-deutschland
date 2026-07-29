@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+
+# von scripts/build_data.py erzeugt — schreibt die GitHub Action, nie von Hand
+data/badestellen.json
