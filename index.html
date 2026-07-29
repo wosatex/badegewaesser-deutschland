@@ -807,6 +807,7 @@ function zeigeGeoHinweis(text){
 }
 
 function sucheStandort(){
+  if(S.sort === "dist"){ S.sort = "score"; zeichneChips(); zeichne(); return; }
   if(S.geo){ S.sort = "dist"; zeichneChips(); zeichne(); return; }
   if(!navigator.geolocation){ zeigeGeoHinweis("Standortabfrage wird von diesem Browser nicht unterstützt."); return; }
   S.geoState = "sucht"; zeichneChips();
@@ -959,7 +960,7 @@ document.addEventListener("click", e => {
   const naeheBtn = e.target.closest("[data-near]");
   const issuesBtn = e.target.closest("[data-issues]");
   const jumpBtn = e.target.closest("[data-jump]");
-  if(sortBtn){ S.sort = sortBtn.dataset.sort; zeichneChips(); zeichne(); }
+  if(sortBtn){ S.sort = (S.sort === sortBtn.dataset.sort) ? "score" : sortBtn.dataset.sort; zeichneChips(); zeichne(); }
   else if(naeheBtn){ sucheStandort(); }
   else if(issuesBtn){ S.issues = !S.issues; zeichneChips(); zeichne(); }
   else if(jumpBtn){ springeZu(jumpBtn.dataset.jump); }
