@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -329,47 +330,131 @@ def konnektor_sh() -> list[dict]:
     return out
 
 
-HH_WFS = "https://gateway.hamburg.de/OGCFassade/BSU_WFS_BADEGEWAESSER.aspx"
+HH_WFS = "https://geodienste.hamburg.de/HH_WFS_Badegewaesser"
+
+# EU-Jahreseinstufung, Stand Juli 2026 nur mit den Codes 2 und 3 in freier Wildbahn
+# gesehen; als Standardskala des LGV übernommen. Codes <=0 kommen ebenfalls vor
+# (z.B. -1 bei "gesperrt", -2 bei einer Stelle mit "keine Beanstandung") und lassen
+# sich ohne offizielle Dokumentation nicht sicher deuten - bewusst nicht gemappt,
+# um keine Einstufung zu erfinden. Das eigentliche Warnsignal liefert "hinweis".
+HH_EINSTUFUNG = {4: "ausgezeichnet", 3: "gut", 2: "ausreichend", 1: "mangelhaft"}
+
+
+def _hh_geojson(typename: str) -> list[dict]:
+    r = hole(HH_WFS, params={
+        "SERVICE": "WFS", "VERSION": "2.0.0", "REQUEST": "GetFeature",
+        "TYPENAMES": typename, "OUTPUTFORMAT": "application/geo+json",
+        "SRSNAME": "EPSG:4326",
+    })
+    return r.json().get("features", [])
+
+
+def _hh_eea_referenz() -> list[tuple[str, float, float, str]]:
+    """Die WFS-Stammdaten haben keine BADEGEWAESSERID, nur einen Namen, der
+    nicht mit dem EEA-Namen übereinstimmt ("Eichbaumsee, Badestelle Nord" vs.
+    "EICHBAUMSEE BADEPLATZ NORD"). Für die amtliche ID und den Wasserart-Code
+    daher die EEA-Basis auf HH gefiltert erneut abfragen und über die
+    Koordinate zuordnen (siehe _naechste_id) - kein Raten, alle 17 Hamburger
+    Stellen liegen unter 260 m vom EEA-Punkt entfernt, die zweitnächste
+    Kandidatin jeweils über 600 m."""
+    service = _eea_service_url()
+    layer_id = _eea_find_point_layer(service)
+    r = hole(f"{service}/{layer_id}/query", params={
+        "where": "countryCode='DE' AND bathingWaterIdentifier LIKE 'DEHH%'",
+        "outFields": "bathingWaterIdentifier,bwWaterCategory,longitude,latitude",
+        "returnGeometry": "false", "f": "json", "resultRecordCount": 200,
+    })
+    return [(a["bathingWaterIdentifier"], a["latitude"], a["longitude"], a.get("bwWaterCategory") or "")
+            for a in (f["attributes"] for f in r.json().get("features", []))]
+
+
+def _naechste_id(lat: float, lon: float, kandidaten: list[tuple[str, float, float, str]],
+                  max_m: float = 500.0):
+    def abstand_m(lat1, lon1, lat2, lon2):
+        R = 6371000
+        p1, p2 = math.radians(lat1), math.radians(lat2)
+        dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        return 2 * R * math.asin(math.sqrt(a))
+
+    beste = min(kandidaten, key=lambda k: abstand_m(lat, lon, k[1], k[2]))
+    return beste if abstand_m(lat, lon, beste[1], beste[2]) <= max_m else None
 
 
 def konnektor_hh() -> list[dict]:
     """
-    [PRUEF] Hamburg, WFS, Lizenz DL-DE-BY 2.0.
+    Hamburg, 17 Badestellen. WFS 2.0.0, Feature-Typen app:badegewaesser
+    (Stammdaten) und app:badegewaesser_proben (Einzelmessungen der Saison,
+    verknüpft über den Namen - beide Feature-Typen stammen aus demselben
+    Fachverfahren und benutzen identische Namen).
 
-    Hamburg stellt Geodaten zunehmend auch über OGC API - Features bereit.
-    Falls für Badegewässer verfügbar, ist das der bequemere Weg (JSON statt GML)
-    und dieser Konnektor kann stark schrumpfen. Im Transparenzportal prüfen.
+    badegewaesser_proben-Felder: name, datum (JJJJMMTT), mpn (E. coli nach der
+    MPN-Methode, DIN EN ISO 9308-3 - die für Hamburg dokumentierte Methode für
+    genau diesen Parameter), enterokokken, temperatur, sichttiefe (alle mit
+    Dezimalkomma, teils "<15"/">2,0" zensiert).
+
+    hinweis ist NNNN (kein Hinweis) oder baden_verboten - das ist das
+    verlässliche Warnsignal, nicht eg_einstufung (siehe HH_EINSTUFUNG oben).
+
+    url kommt aus link_zu_details (Stellen-Steckbrief mit aktuellem Status);
+    das ersetzt bewusst den generischen EEA-Link auf ein PDF-Jahresprofil.
     """
-    r = hole(HH_WFS, params={
-        "SERVICE": "WFS", "VERSION": "1.1.0", "REQUEST": "GetFeature",
-        "TYPENAME": "badegewaesser", "SRSNAME": "EPSG:4326",
-    })
-    wurzel = ET.fromstring(r.content)
-    ns = {"gml": "http://www.opengis.net/gml"}
+    referenz = _hh_eea_referenz()
+
+    proben_je_name: dict[str, list[str]] = {}
+    for f in _hh_geojson("app:badegewaesser_proben"):
+        p = f["properties"]
+        name = p.get("name")
+        if name:
+            proben_je_name.setdefault(name, []).append(p)
+
+    def zahl(v):
+        if v is None:
+            return None
+        try:
+            return float(str(v).replace(",", ".").replace("<", "").replace(">", "").strip())
+        except (TypeError, ValueError):
+            return None
 
     out = []
-    for i, member in enumerate(wurzel.iter()):
-        tag = member.tag.split("}")[-1].lower()
-        if "badegewaesser" not in tag or member is wurzel:
+    for f in _hh_geojson("app:badegewaesser"):
+        p = f["properties"]
+        name = p.get("name")
+        geom = f.get("geometry") or {}
+        lon, lat = (geom.get("coordinates") or [None, None])[:2]
+        if lat is None or lon is None or not name:
             continue
-        felder = {k.tag.split("}")[-1]: (k.text or "").strip() for k in member}
-        pos = member.find(".//gml:pos", ns)
-        lat = lon = None
-        if pos is not None and pos.text:
-            teile = pos.text.split()
-            if len(teile) >= 2:
-                lat, lon = float(teile[0]), float(teile[1])
+
+        treffer = _naechste_id(lat, lon, referenz)
+        if not treffer:
+            continue
+        bwid, _, _, kategorie = treffer
+
+        proben = proben_je_name.get(name) or []
+        letzte = sorted(proben, key=lambda r: r.get("datum") or "")[-1] if proben else None
+
+        hinweise = []
+        if p.get("hinweis") == "baden_verboten" or p.get("badesaison") == "gesperrt":
+            hinweise.append({"art": "warnung", "text": p.get("bemerkung_bsu") or "Baden verboten"})
+
+        ecoli = zahl((letzte or {}).get("mpn"))
+        entero = zahl((letzte or {}).get("enterokokken"))
 
         out.append(stelle(
-            "HH",
-            felder.get("badegewaesserid") or f"DEHH_{i:04d}",
-            felder.get("name") or felder.get("bezeichnung") or "Badegewässer",
-            gewaesser=felder.get("gewaesser"),
-            ort=felder.get("bezirk"),
+            "HH", bwid, name,
+            ort="Hamburg",
+            typ="kueste" if kategorie in ("Coastal", "Transitional") else "binnen",
             lat=lat, lon=lon,
-            vertrauen="amtlich",
-            einstufung=felder.get("einstufung") or felder.get("qualitaet"),
-            url="https://www.hamburg.de/badegewaesser/",
+            vertrauen="berechnet" if (ecoli is not None and entero is not None) else "amtlich",
+            einstufung=HH_EINSTUFUNG.get(p.get("eg_einstufung")),
+            ampel=einstufung_ampel(HH_EINSTUFUNG.get(p.get("eg_einstufung"))),
+            probe=(f"{letzte['datum'][:4]}-{letzte['datum'][4:6]}-{letzte['datum'][6:8]}"
+                   if letzte and letzte.get("datum") else None),
+            ecoli=ecoli, entero=entero,
+            temperatur=zahl((letzte or {}).get("temperatur")),
+            sichttiefe=zahl((letzte or {}).get("sichttiefe")),
+            hinweise=hinweise,
+            url=p.get("link_zu_details"),
         ))
     return out
 
