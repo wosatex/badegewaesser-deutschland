@@ -36,7 +36,6 @@ import re
 import sys
 import time
 import traceback
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -459,50 +458,52 @@ def konnektor_hh() -> list[dict]:
     return out
 
 
-MV_WFS = "https://www.geodaten-mv.de/dienste/badewassermv_wfs"
-
-
 def konnektor_mv() -> list[dict]:
     """
-    [PRUEF] Mecklenburg-Vorpommern, ~500 Badegewässer. WFS 2.0.0.
-    Lizenz laut Metadatensatz: "Es gelten keine Bedingungen" — die freieste
-    Lage aller Länder.
+    [TODO] Mecklenburg-Vorpommern — größer als "nur Feldnamen korrigieren",
+    braucht einen eigenen Scraper wie NI. Kein Raten mehr nötig, der Weg ist
+    klar, nur der Aufwand sprengt diesen Durchgang:
 
-    Der WFS liefert vermutlich nur Geometrie und Einstufung. Für die Keimzahlen
-    der laufenden Saison zusätzlich badewasser-mv.de anzapfen (siehe TODO unten).
+    Geprüft und bestätigt per echtem Abruf (nicht geraten):
+
+    1. Der WFS (sm:badewassermv_wfs, EPSG:25833, GeoJSON via
+       OUTPUTFORMAT=application/json; subtype=geojson) liefert NUR
+       {name, eu: "ja"/"nein", anzeige_nr} + Geometrie. 546 Feature, davon 305
+       mit eu=ja. Keine Einstufung, keine Keimzahlen — der alte Docstring hat
+       das falsch vermutet. Dieser Dienst allein bringt gegenüber der
+       EEA-Basis keinen Mehrwert (die hat Name+Koordinaten schon).
+
+    2. Die echten Messwerte (E. coli, Intestinale Enterokokken, Wassertemperatur,
+       Sichttiefe, pH, Datum) stehen serverseitig gerendert in einer Tabelle
+       (class="badestelle-messwerte") auf:
+         https://www.regierung-mv.de/Landesregierung/sm/gesundheit/
+         Badewasserqualitaet/badewasserkarte/badestelle?gaia.badestelle.id=<ID>
+       Eine Seite pro Badestelle, kein Login, kein Anubis-Block (getestet mit
+       ID 558 = Schmaler Luzin, Carwitz: 3 Messungen Mai-Juli 2026 abrufbar).
+
+    3. Die ID-Liste dafür liefert badewasser-mv.de selbst in zwei Bulk-JSON-
+       Feeds (im Netzwerk-Tab gefunden, kein Login, kein Rate-Limit sichtbar):
+         https://badewasser-mv.de/_badestelle.php       — alle Stellen,
+           Feld "public_id" ist genau die gaia.badestelle.id von oben.
+           Koordinaten in EPSG:25832, brauchen Umrechnung nach WGS84.
+         https://badewasser-mv.de/_warnhinweise.php     — aktuelle Warnungen
+           (z.B. Cyanobakterien/Blaualgen) im Klartext, direkt als
+           hinweise=[{"art":"warnung",...}] verwendbar, keine Einzelabrufe
+           nötig.
+
+    4. public_id/id sind KEINE amtlichen BADEGEWAESSERID (Format DEMV_...) —
+       Zuordnung zur EEA-Basis müsste wie bei HH über Koordinaten-Abstand
+       laufen (~300 EU-Stellen für konnektor_eea() relevant).
+
+    Damit ist der Umfang klar: ~300 Einzelseiten scrapen + Koordinaten-Join,
+    nicht eine Codezeile Feldname. Das ist ein eigener Durchgang wert (siehe
+    konnektor_ni() als Vorlage für den Scraper-Stil), nicht dieser.
     """
-    r = hole(MV_WFS, params={
-        "SERVICE": "WFS", "VERSION": "2.0.0", "REQUEST": "GetFeature",
-        "TYPENAMES": "badestellen", "SRSNAME": "urn:ogc:def:crs:EPSG::4326",
-        "OUTPUTFORMAT": "application/gml+xml; version=3.2",
-    })
-    wurzel = ET.fromstring(r.content)
-    ns = {"gml": "http://www.opengis.net/gml/3.2"}
-
-    out = []
-    for i, m in enumerate(wurzel.iter()):
-        if "badestelle" not in m.tag.split("}")[-1].lower():
-            continue
-        f = {k.tag.split("}")[-1].lower(): (k.text or "").strip() for k in m}
-        pos = m.find(".//gml:pos", ns)
-        lat = lon = None
-        if pos is not None and pos.text:
-            t = pos.text.split()
-            if len(t) >= 2:
-                lat, lon = float(t[0]), float(t[1])
-
-        name = f.get("name") or f.get("bezeichnung") or f"Badestelle {i}"
-        gew = f.get("gewaesser", "")
-        out.append(stelle(
-            "MV", f.get("badegewaesserid") or f"DEMV_{i:04d}", name,
-            gewaesser=gew, ort=f.get("gemeinde"),
-            typ="kueste" if "ostsee" in gew.lower() else "binnen",
-            lat=lat, lon=lon,
-            vertrauen="amtlich",
-            einstufung=f.get("einstufung") or f.get("qualitaet"),
-            url="https://www.badewasser-mv.de/",
-        ))
-    return out
+    raise NotImplementedError(
+        "WFS liefert keine Messwerte; echte Daten müssen pro Stelle von "
+        "regierung-mv.de gescrapt werden (Details im Docstring) — eigener "
+        "Durchgang, kein Feldnamen-Fix."
+    )
 
 
 ST_REST = ("https://www.geodatenportal.sachsen-anhalt.de/arcgis/rest/services/"
