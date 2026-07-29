@@ -234,6 +234,58 @@ body[data-demo="1"] .demo-flag{display:block}
   background:rgba(255,107,74,.08);border:1px solid rgba(255,107,74,.28);color:#ffcabb;font-size:.84rem;
 }
 
+/* ---------- Übersicht (Kennzahlen, Verteilung, Auffälligkeiten) ---------- */
+.hero{padding:1.1rem var(--pad) .2rem}
+.hero__lede{margin:0 0 1.3rem;font-family:var(--display);font-weight:700;font-size:1.25rem;
+  line-height:1.32;letter-spacing:-.01em;max-width:44ch}
+.hero__lede b{color:var(--foam)}
+.hero__cap{margin:0 0 .5rem;font-family:var(--mono);font-size:.64rem;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--ink-3)}
+.hero__block{margin:0 0 1.5rem}
+
+.hist{display:flex;align-items:flex-end;gap:2px;height:2.4rem;margin-bottom:.35rem}
+.hist span{flex:1;border-radius:2px 2px 0 0;min-height:1px}
+.scale-bar{height:.8rem;border-radius:5px;border:1px solid var(--line)}
+.scale-ticks{position:relative;height:1rem;margin-top:.35rem}
+.scale-ticks span{position:absolute;top:0;transform:translateX(-50%);font-family:var(--mono);font-size:.62rem;color:var(--ink-3)}
+.scale-ticks span:first-child{transform:none}
+.scale-ticks span:last-child{transform:translateX(-100%)}
+
+.class-bars{display:flex;gap:.3rem;align-items:stretch}
+.class-bar{display:flex;flex-direction:column;gap:.35rem;min-width:0}
+.class-bar i{display:block;height:.8rem;border-radius:5px}
+.class-bar span{font-size:.68rem;line-height:1.3;color:var(--ink-2);display:block}
+.class-bar b{display:block;font-family:var(--mono);font-size:.85rem;color:var(--ink)}
+
+.hero__note{margin:.9rem 0 0;font-size:.76rem;line-height:1.5;color:var(--ink-3);
+  border-left:2px solid var(--line);padding-left:.7rem}
+
+.auffaellig{margin:1.5rem 0 0}
+.auffaellig h2{margin:0 0 .6rem;font-family:var(--mono);font-size:.66rem;font-weight:600;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+.auffaellig__list{display:grid;grid-template-columns:1fr;gap:.45rem}
+@media(min-width:640px){.auffaellig__list{grid-template-columns:1fr 1fr}}
+.auffaellig__card{display:flex;align-items:center;gap:.7rem;background:var(--card);border:1px solid var(--line);
+  border-radius:10px;padding:.55rem .7rem;text-align:left;width:100%;min-width:0;cursor:pointer}
+.auffaellig__card i{flex:none;min-width:2.3rem;height:1.9rem;border-radius:7px;display:grid;place-items:center;
+  font-family:var(--mono);font-size:.78rem;font-weight:700;font-style:normal;color:#fff;padding:0 .3rem}
+.auffaellig__card b{display:block;font-weight:600;font-size:.85rem;letter-spacing:-.01em;color:var(--ink)}
+.auffaellig__card em{display:block;font-style:normal;font-size:.72rem;color:var(--ink-2);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.auffaellig__card span{flex:1 1 0;min-width:0;display:block;overflow:hidden}
+
+/* ---------- Sortier-/Filter-Chips ---------- */
+.chips{display:flex;gap:.4rem;overflow-x:auto;padding:.7rem var(--pad);scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:.4rem .8rem;
+  font-family:var(--mono);font-size:.7rem;color:var(--ink-2);white-space:nowrap;cursor:pointer}
+.chip[aria-pressed="true"]{background:linear-gradient(120deg,var(--mid),var(--shallow));color:#fff;border-color:transparent}
+.chip.alt[aria-pressed="true"]{background:var(--alarm);color:#fff}
+.chip-hint{margin:0 var(--pad) .6rem;font-size:.72rem;color:var(--ink-3)}
+
+.spot.flash{animation:flash 2.2s ease}
+@keyframes flash{0%,40%{background:rgba(127,227,180,.22)}100%{background:var(--card)}}
+
 @media(prefers-reduced-motion:reduce){
   .gauge__fill{transition:none}
   *{scroll-behavior:auto}
@@ -272,6 +324,11 @@ body[data-demo="1"] .demo-flag{display:block}
     <button id="v-karte" aria-pressed="false">Karte</button>
   </div>
 </div>
+
+<div class="chips" id="chips"></div>
+<p class="chip-hint hidden" id="chip-hint"></p>
+
+<section class="hero" id="hero"></section>
 
 <p class="tally">
   <span id="tally-text">Wird geladen …</span>
@@ -468,7 +525,8 @@ function demoDaten(){
 /* ============================================================
    5 — Zustand & Rendering
    ============================================================ */
-const S = { daten:null, ansicht:"liste", land:"", suche:"", karte:null, marker:null };
+const S = { daten:null, ansicht:"liste", land:"", suche:"", karte:null, marker:null,
+  sort:"score", issues:false, geo:null, geoState:"idle" };
 
 const el = id => document.getElementById(id);
 const fmtDatum = iso => {
@@ -499,11 +557,107 @@ function fuelleDropdown(){
 
 function gefiltert(){
   const q = S.suche.trim().toLowerCase();
-  return S.daten.stellen.filter(s => {
+  let treffer = S.daten.stellen.filter(s => {
     if(S.land && s.land !== S.land) return false;
+    if(S.issues && !istAuffaellig(s)) return false;
     if(!q) return true;
     return [s.name, s.ort, s.gewaesser].some(v => (v||"").toLowerCase().includes(q));
-  }).sort((a,b) => (a.name||"").localeCompare(b.name||"","de"));
+  });
+  if(S.geo) treffer = treffer.map(s => ({...s,
+    _dist: (s.lat != null && s.lon != null) ? distKm(S.geo.lat, S.geo.lon, s.lat, s.lon) : null }));
+
+  const byName = (a,b) => (a.name||"").localeCompare(b.name||"","de");
+  const m = s => s.messwerte || {};
+  if(S.sort === "worst")     treffer.sort((a,b) => rang(a) - rang(b) || byName(a,b));
+  else if(S.sort === "name") treffer.sort(byName);
+  else if(S.sort === "temp") treffer.sort((a,b) => (m(b).temperatur ?? -99) - (m(a).temperatur ?? -99) || byName(a,b));
+  else if(S.sort === "clear")treffer.sort((a,b) => (m(b).sichttiefe ?? -1) - (m(a).sichttiefe ?? -1) || byName(a,b));
+  else if(S.sort === "dist") treffer.sort((a,b) => (a._dist ?? 9e9) - (b._dist ?? 9e9));
+  else                       treffer.sort((a,b) => rang(b) - rang(a) || byName(a,b)); // score
+
+  return treffer;
+}
+
+/* ============================================================
+   5b — Auffälligkeiten, Rang, Farben für Übersicht & Sortierung
+   ============================================================ */
+function einstufungNorm(text){
+  const t = (text || "").toLowerCase();
+  if(t.includes("ausgezeichnet") || t.includes("excellent")) return "ausgezeichnet";
+  if(t.includes("gut") || t.includes("good"))                return "gut";
+  if(t.includes("ausreichend") || t.includes("sufficient"))  return "ausreichend";
+  if(t.includes("mangelhaft") || t.includes("poor"))         return "mangelhaft";
+  return "keine";
+}
+const EINSTUFUNG_RANG  = { ausgezeichnet:95, gut:80, ausreichend:50, mangelhaft:15, keine:55 };
+const EINSTUFUNG_FARBE = { ausgezeichnet:"#35b37e", gut:"#1c8a5f", ausreichend:"#ffbe5a", mangelhaft:"#ff6b4a", keine:"#5d7f7c" };
+const EINSTUFUNG_LABEL = { ausgezeichnet:"ausgezeichnet", gut:"gut", ausreichend:"ausreichend", mangelhaft:"mangelhaft", keine:"ohne Einstufung" };
+
+function rang(s){
+  const p = bewerte(s);
+  if(p != null) return p;
+  let r = EINSTUFUNG_RANG[einstufungNorm(s.einstufung)];
+  if(s.ampel === "gelb") r = Math.min(r, 50);
+  if(s.ampel === "rot")  r = Math.min(r, 20);
+  return r;
+}
+
+function istAuffaellig(s){
+  if((s.hinweise || []).length) return true;
+  if(hundeHinweis((s.messwerte||{}).chlorophyll)) return true;
+  const p = bewerte(s);
+  if(p != null) return p < 70;
+  return s.ampel === "rot" || s.ampel === "gelb";
+}
+
+function istUnbedenklich(s){
+  const p = bewerte(s);
+  if(p != null) return p >= 70;
+  if(s.ampel === "rot" || s.ampel === "gelb") return false;
+  const e = einstufungNorm(s.einstufung);
+  return e === "ausgezeichnet" || e === "gut" || (e === "keine" && s.ampel === "gruen");
+}
+
+// Sortiert die stärksten Einzelabzüge nach Gewicht, damit "Heute auffällig"
+// nicht nur eine Zahl zeigt, sondern den wahrscheinlichsten Grund dafür.
+function hauptgrund(s){
+  const h = (s.hinweise || [])[0];
+  if(h) return h.text;
+  const hund = hundeHinweis((s.messwerte||{}).chlorophyll);
+  if(hund) return `Erhöhte Blaualgenwerte (${s.messwerte.chlorophyll} µg/l Chlorophyll a)`;
+  const m = s.messwerte || {};
+  const g = GRENZEN[s.typ === "kueste" ? "kueste" : "binnen"];
+  const posten = [];
+  if(m.ecoli != null)  posten.push(["Erhöhte E.-coli-Werte", stufenAbzug(m.ecoli, g.ecoli)]);
+  if(m.entero != null) posten.push(["Erhöhte Enterokokkenwerte", stufenAbzug(m.entero, g.entero)]);
+  if(m.sichttiefe != null){
+    const t = m.sichttiefe;
+    posten.push([`Sehr trübes Wasser (Sichttiefe ${t} m)`, t >= 1 ? 0 : t >= .5 ? 6 : t >= .3 ? 12 : 18]);
+  }
+  posten.sort((a,b) => b[1] - a[1]);
+  if(posten.length && posten[0][1] > 0) return posten[0][0];
+  return s.einstufung ? `Einstufung: ${s.einstufung}` : "Auffällig eingestuft";
+}
+
+function hexZuRgb(h){ h = h.replace("#",""); return [0,2,4].map(i => parseInt(h.substr(i,2),16)); }
+function lerpFarbe(a,b,t){
+  const A = hexZuRgb(a), B = hexZuRgb(b);
+  return "#" + A.map((v,i) => Math.round(v + (B[i]-v)*t).toString(16).padStart(2,"0")).join("");
+}
+const SCORE_STOPS = [[0,"#0a2f43"],[45,"#0e5c5c"],[75,"#1c8a5f"],[100,"#35b37e"]];
+function farbeBeiScore(p){
+  if(p < 25) return "#ff6b4a";
+  for(let i=0;i<SCORE_STOPS.length-1;i++){
+    const [p0,c0] = SCORE_STOPS[i], [p1,c1] = SCORE_STOPS[i+1];
+    if(p <= p1) return lerpFarbe(c0, c1, (p-p0)/(p1-p0));
+  }
+  return SCORE_STOPS[SCORE_STOPS.length-1][1];
+}
+function distKm(a,b,c,d){
+  const R = 6371, rad = Math.PI/180;
+  const x = (c-a)*rad, y = (d-b)*rad;
+  const h = Math.sin(x/2)**2 + Math.cos(a*rad)*Math.cos(c*rad)*Math.sin(y/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
 }
 
 // Cyanobakterien (Blaualgen) können für Hunde schon durch Schlecken am Fell
@@ -532,7 +686,7 @@ function karteZeile(s){
   const stufeText = { berechnet:"berechnet", amtlich:"amtliche Einstufung", jahresnote:"nur Jahresnote" }[s.vertrauen] || s.vertrauen;
 
   return `
-  <li class="spot" data-ampel="${esc(s.ampel||"unbekannt")}">
+  <li class="spot" data-id="${esc(s.id)}" data-ampel="${esc(s.ampel||"unbekannt")}">
     <div class="spot__head">
       <div>
         <h2 class="spot__name">${esc(s.name)}</h2>
@@ -566,7 +720,115 @@ function karteZeile(s){
   </li>`;
 }
 
+function zeichneHero(){
+  const hero = el("hero");
+  const scope = S.daten.stellen.filter(s => !S.land || s.land === S.land);
+  if(!scope.length){ hero.innerHTML = ""; return; }
+
+  const berechnet = scope.filter(s => bewerte(s) != null);
+  const amtlich = scope.filter(s => bewerte(s) == null);
+  const landtext = S.land ? `${esc(LAENDER[S.land] || S.land)}er ` : "deutschen ";
+  const gut = scope.filter(istUnbedenklich).length;
+
+  let h = `<p class="hero__lede"><b>${gut}</b> von ${scope.length} ${landtext}Badestellen ${scope.length === 1 ? "ist" : "sind"} heute unbedenklich.</p>`;
+
+  if(berechnet.length){
+    const bins = new Array(20).fill(0);
+    berechnet.forEach(s => { const p = bewerte(s); bins[Math.min(19, Math.max(0, Math.floor(p/5)))]++; });
+    const max = Math.max(1, ...bins);
+    h += `<div class="hero__block">
+      <p class="hero__cap">Berechnete Bewertung — ${berechnet.length} Stelle${berechnet.length===1?"":"n"} mit Einzelmesswerten</p>
+      <div class="hist" aria-hidden="true">${bins.map((n,i) =>
+        `<span style="height:${n ? Math.max(6, n/max*100) : 2}%;background:${farbeBeiScore(i*5+2)};opacity:${n?1:.18}"></span>`).join("")}</div>
+      <div class="scale-bar" style="background:linear-gradient(90deg,#0a2f43,#0e5c5c 45%,#1c8a5f 75%,#35b37e)"></div>
+      <div class="scale-ticks">${[0,25,50,75,100].map(t => `<span style="left:${t}%">${t}</span>`).join("")}</div>
+    </div>`;
+  }
+
+  if(amtlich.length){
+    const kategorien = ["ausgezeichnet","gut","ausreichend","mangelhaft","keine"];
+    const teile = kategorien.map(k => ({ k, n: amtlich.filter(s => einstufungNorm(s.einstufung) === k).length })).filter(t => t.n);
+    h += `<div class="hero__block">
+      <p class="hero__cap">Amtliche Einstufung — ${amtlich.length} Stelle${amtlich.length===1?"":"n"} ohne berechnete Punktzahl</p>
+      <div class="class-bars">${teile.map(t =>
+        `<div class="class-bar" style="flex-grow:${t.n}"><i style="background:${EINSTUFUNG_FARBE[t.k]}"></i><span><b>${t.n}</b> ${esc(EINSTUFUNG_LABEL[t.k])}</span></div>`).join("")}</div>
+    </div>`;
+  }
+
+  const auffaellig = scope.filter(istAuffaellig).sort((a,b) => rang(a) - rang(b));
+  if(auffaellig.length){
+    h += `<div class="auffaellig"><h2>Heute auffällig</h2><div class="auffaellig__list">`;
+    h += auffaellig.slice(0,12).map(s => {
+      const p = bewerte(s);
+      const farbe = p != null ? farbeBeiScore(p) : EINSTUFUNG_FARBE[einstufungNorm(s.einstufung)];
+      const label = p != null ? p : esc(s.land);
+      return `<button type="button" class="auffaellig__card" data-jump="${esc(s.id)}">
+        <i style="background:${farbe}">${label}</i>
+        <span><b>${esc(s.name)}</b><em>${esc(hauptgrund(s))}</em></span>
+      </button>`;
+    }).join("");
+    h += `</div></div>`;
+  }
+
+  h += `<p class="hero__note">Stellen mit Einzelmesswerten zeigen eine berechnete Punktzahl, alle anderen die amtliche
+    Einstufung unverändert — siehe „Wie die Zahl entsteht" weiter unten.</p>`;
+
+  hero.innerHTML = h;
+}
+
+function zeichneChips(){
+  const chips = el("chips");
+  const naeheLabel = S.geoState === "sucht" ? "sucht Standort …" : S.geo ? "Nächste zuerst" : "In meiner Nähe";
+  chips.innerHTML =
+    `<button type="button" class="chip" data-sort="score" aria-pressed="${S.sort==="score"}">Beste zuerst</button>` +
+    `<button type="button" class="chip" data-sort="worst" aria-pressed="${S.sort==="worst"}">Schlechteste zuerst</button>` +
+    `<button type="button" class="chip" data-sort="clear" aria-pressed="${S.sort==="clear"}">Klarstes Wasser</button>` +
+    `<button type="button" class="chip" data-sort="temp" aria-pressed="${S.sort==="temp"}">Wärmstes Wasser</button>` +
+    `<button type="button" class="chip" data-sort="name" aria-pressed="${S.sort==="name"}">A–Z</button>` +
+    `<button type="button" class="chip" data-near="1" aria-pressed="${S.sort==="dist"}">${naeheLabel}</button>` +
+    `<button type="button" class="chip alt" data-issues="1" aria-pressed="${S.issues}">Nur Auffälligkeiten</button>`;
+}
+
+function springeZu(id){
+  let neuGezeichnet = false;
+  if(S.issues){ S.issues = false; neuGezeichnet = true; }
+  if(S.suche){ S.suche = ""; el("f-suche").value = ""; neuGezeichnet = true; }
+  if(neuGezeichnet) zeichneChips();
+  if(S.ansicht !== "liste") setzeAnsicht("liste");
+  else if(neuGezeichnet) zeichne();
+  const ziel = Array.from(document.querySelectorAll(".spot")).find(n => n.dataset.id === id);
+  if(!ziel) return;
+  ziel.scrollIntoView({ behavior:"smooth", block:"center" });
+  ziel.classList.add("flash");
+  setTimeout(() => ziel.classList.remove("flash"), 2200);
+}
+
+function zeigeGeoHinweis(text){
+  const hint = el("chip-hint");
+  hint.textContent = text;
+  hint.classList.remove("hidden");
+}
+
+function sucheStandort(){
+  if(S.geo){ S.sort = "dist"; zeichneChips(); zeichne(); return; }
+  if(!navigator.geolocation){ zeigeGeoHinweis("Standortabfrage wird von diesem Browser nicht unterstützt."); return; }
+  S.geoState = "sucht"; zeichneChips();
+  navigator.geolocation.getCurrentPosition(
+    p => {
+      S.geo = { lat:p.coords.latitude, lon:p.coords.longitude };
+      S.geoState = "ok"; S.sort = "dist";
+      zeichneChips(); zeichne();
+    },
+    () => {
+      S.geoState = "nein"; zeichneChips();
+      zeigeGeoHinweis("Standort nicht verfügbar. Die anderen Sortierungen funktionieren weiterhin.");
+    },
+    { timeout:8000, maximumAge:300000 }
+  );
+}
+
 function zeichne(){
+  zeichneHero();
   const treffer = gefiltert();
   const liste = el("liste");
   const leer = el("leer");
@@ -664,6 +926,7 @@ function uebernehmen(d, ausCache){
   el("m-count").textContent = d.stellen.length.toLocaleString("de-DE");
   el("m-laender").textContent = new Set(d.stellen.map(s => s.land)).size;
   fuelleDropdown();
+  zeichneChips();
   zeichne();
   if(!ausCache && !d.demo) Cache.schreibe(d);
 }
@@ -695,6 +958,17 @@ el("f-suche").addEventListener("input", e => {
 
 el("v-liste").addEventListener("click", () => setzeAnsicht("liste"));
 el("v-karte").addEventListener("click", () => setzeAnsicht("karte"));
+
+document.addEventListener("click", e => {
+  const sortBtn = e.target.closest("[data-sort]");
+  const naeheBtn = e.target.closest("[data-near]");
+  const issuesBtn = e.target.closest("[data-issues]");
+  const jumpBtn = e.target.closest("[data-jump]");
+  if(sortBtn){ S.sort = sortBtn.dataset.sort; zeichneChips(); zeichne(); }
+  else if(naeheBtn){ sucheStandort(); }
+  else if(issuesBtn){ S.issues = !S.issues; zeichneChips(); zeichne(); }
+  else if(jumpBtn){ springeZu(jumpBtn.dataset.jump); }
+});
 
 function setzeAnsicht(a){
   S.ansicht = a;
