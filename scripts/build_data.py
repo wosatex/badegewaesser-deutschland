@@ -33,6 +33,7 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -113,25 +114,59 @@ def einstufung_ampel(e: str | None) -> str:
 # BASIS — EEA Discomap, EU-weit
 # ==========================================================================
 
-EEA_URL = ("https://marine.discomap.eea.europa.eu/arcgis/rest/services/"
-           "BathingWater/BathingWater_Dyna_WM_2018/MapServer")
+EEA_BASE = "https://marine.discomap.eea.europa.eu/arcgis/rest/services/BathingWater"
+
+
+def _eea_service_url() -> str:
+    """Die EEA veröffentlicht jedes Berichtsjahr einen neu datierten Dienst
+    (…_Dyna_WM_2025 usw.) und lässt die älteren stehen. Der undatierte
+    "BathingWater_Dyna_WM" ist KEIN Alias auf den neuesten Stand, sondern
+    selbst eingefroren (Stand Juli 2026 bei Berichtsjahr 2022). Deshalb den
+    höchsten Jahrgang zur Laufzeit ermitteln statt ein Jahr fest zu verdrahten."""
+    r = hole(f"{EEA_BASE}?f=json")
+    namen = [s["name"].rsplit("/", 1)[-1] for s in r.json().get("services", [])]
+    jahre = []
+    for n in namen:
+        m = re.fullmatch(r"BathingWater_Dyna_WM_(\d{4})", n)
+        if m:
+            jahre.append(int(m.group(1)))
+    if not jahre:
+        raise RuntimeError("Kein datierter EEA-Dienst gefunden (BathingWater_Dyna_WM_<Jahr>)")
+    return f"{EEA_BASE}/BathingWater_Dyna_WM_{max(jahre)}/MapServer"
+
+
+def _eea_find_point_layer(service_url: str) -> int:
+    """Die Layer-ID des Punkt-Layers wechselt zwischen Jahrgängen (2018er Dienst:
+    ID 0-4 alle "Bathing water quality"; 2025er Dienst: ID 3 "…(point)", ID 14
+    "…(symbol)"). Über geometryType und Namen auflösen statt eine ID zu raten."""
+    layers = hole(f"{service_url}?f=json").json().get("layers", [])
+    punkte = [l for l in layers if l.get("geometryType") == "esriGeometryPoint"]
+    if not punkte:
+        raise RuntimeError("Kein Punkt-Layer im EEA-Dienst gefunden")
+    bevorzugt = [l for l in punkte if "point" in l["name"].lower()]
+    return (bevorzugt or punkte)[0]["id"]
 
 
 def konnektor_eea() -> list[dict]:
     """
-    [PRUEF] ArcGIS-REST. Liefert Name, Koordinaten, Link auf das nationale
-    Badegewässerprofil und die Bewertungsstatus.
+    Basis für alle 16 Länder. EEA-ArcGIS-REST, aktuellster jährlicher Dienst
+    (siehe _eea_service_url). Liefert Name, Koordinaten, Wasserart, EU-Jahres-
+    einstufung und Link auf das nationale Badegewässerprofil. Enthält KEINE
+    Gewässer- oder Gemeindenamen — die liefern ggf. die Länderkonnektoren.
 
-    Vor dem ersten Lauf einmal von Hand aufrufen:
-        {EEA_URL}?f=json                 -> welche Layer-ID trägt "bathing water"?
-        {EEA_URL}/<id>?f=json            -> welche Feldnamen genau?
-    Die Feldnamen unten sind der übliche WISE-Satz, können aber je nach
-    Dienstversion abweichen. LAYER_ID notfalls anpassen.
+    Feldnamen bestätigt am Dienst BathingWater_Dyna_WM_2025, Layer
+    "Bathing water quality (point)" (Stand Juli 2026):
+    bathingWaterIdentifier, bathingWaterName, countryCode, bwWaterCategory
+    (Coastal|Transitional|Lake|River), qualityStatus (Excellent|Good|
+    Sufficient|Poor|Not classified), bwProfileLink, longitude, latitude.
     """
-    LAYER_ID = 1
+    service = _eea_service_url()
+    layer_id = _eea_find_point_layer(service)
+
     params = {
-        "where": "bwid LIKE 'DE%'",
-        "outFields": "*",
+        "where": "countryCode='DE'",
+        "outFields": "bathingWaterIdentifier,bathingWaterName,bwWaterCategory,"
+                     "qualityStatus,bwProfileLink,longitude,latitude",
         "returnGeometry": "true",
         "outSR": "4326",
         "f": "geojson",
@@ -141,7 +176,7 @@ def konnektor_eea() -> list[dict]:
     stellen, offset = [], 0
     while True:
         params["resultOffset"] = offset
-        r = hole(f"{EEA_URL}/{LAYER_ID}/query", params=params)
+        r = hole(f"{service}/{layer_id}/query", params=params)
         gj = r.json()
         feats = gj.get("features", [])
         if not feats:
@@ -151,27 +186,27 @@ def konnektor_eea() -> list[dict]:
             p = f.get("properties") or {}
             geom = (f.get("geometry") or {}).get("coordinates") or [None, None]
 
-            bwid = p.get("bwid") or p.get("BWID") or p.get("bathingWaterIdentifier")
+            bwid = p.get("bathingWaterIdentifier")
             if not bwid:
                 continue
             land = EU_PREFIX.get(str(bwid)[:4].upper())
             if not land:
                 continue
 
-            art = (p.get("bwWaterType") or p.get("waterType") or "").lower()
-            typ = "kueste" if ("coast" in art or "transitional" in art) else "binnen"
-            eins = p.get("quality") or p.get("bwQuality") or p.get("classification")
+            art = (p.get("bwWaterCategory") or "").lower()
+            typ = "kueste" if art in ("coastal", "transitional") else "binnen"
+            eins = p.get("qualityStatus")
+            if eins == "Not classified":
+                eins = None
 
             stellen.append(stelle(
-                land, str(bwid), p.get("bwName") or p.get("name") or str(bwid),
-                gewaesser=p.get("rbdName") or p.get("waterBodyName"),
-                ort=p.get("municipality") or p.get("nutsName"),
+                land, str(bwid), p.get("bathingWaterName") or str(bwid),
                 typ=typ,
                 lat=geom[1], lon=geom[0],
                 vertrauen="jahresnote",
                 einstufung=eins,
                 ampel=einstufung_ampel(eins),
-                url=p.get("bwProfileUrl") or p.get("profileUrl") or p.get("url"),
+                url=p.get("bwProfileLink"),
             ))
 
         if len(feats) < params["resultRecordCount"]:
@@ -357,9 +392,9 @@ ST_REST = ("https://www.geodatenportal.sachsen-anhalt.de/arcgis/rest/services/"
 def konnektor_st() -> list[dict]:
     """
     [PRUEF] Sachsen-Anhalt. Der dokumentierte WMS liegt unter
-    /arcgis/services/LAV/Badegewaesser_LSA/MapServer/WMSServer — derselbe
-    Dienst ist bei ArcGIS fast immer auch unter /arcgis/rest/services/... als
-    REST-Endpunkt erreichbar. Laut Metadatensatz enthält er neueste
+    /arcgis/services/LAV/Badegewaesser_LSA/MapServer/WMSServer — derselbe Dienst
+    ist bei ArcGIS fast immer auch unter /arcgis/rest/services/... als REST-
+    Endpunkt erreichbar. Laut Metadatensatz enthält er neueste
     Untersuchungsergebnisse, letzte Qualitätseinstufung und aktuelle Hinweise,
     also genau das gesuchte Feld-Set.
     """
