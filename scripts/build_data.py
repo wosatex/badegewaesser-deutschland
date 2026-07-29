@@ -1420,13 +1420,136 @@ def konnektor_rp() -> list[dict]:
     return out
 
 
+HE_BASIS = "https://badeseen.hlnug.de"
+
+# "Bewertung der Probe" auf badeseen.hlnug.de, Legende auf jeder Detailseite:
+# 1 = keine Beanstandung, 2 = Nachbeprobung nach §7 Abs.2 veranlasst,
+# 3 = Badesee gesperrt. Ausdrücklich unabhängig von der hygienischen
+# EU-Jahreseinstufung (z.B. bei Cyanobakterien) - deshalb eigenes Signal.
+HE_BEWERTUNG_AMPEL = {3: "rot", 2: "gelb"}
+HE_BEWERTUNG_TEXT = {3: "Badesee gesperrt", 2: "Nachbeprobung nach §7 Abs. 2 veranlasst"}
+
+
 def konnektor_he() -> list[dict]:
     """
-    [TODO] badeseen.hlnug.de.
-    Zuerst das HLNUG-Dienstverzeichnis prüfen (hlnug.de/themen/wasser/daten-und-viewer):
-    liegt dort ein Badegewässer-WFS, wird Hessen von Kategorie C nach A gehoben.
+    Hessen, 61 Badeseen. Kein WFS im HLNUG-Dienstverzeichnis für Badegewässer
+    gefunden (nur Grundwasser/Hochwasser) - badeseen.hlnug.de bleibt die
+    Quelle, aber besser als vermutet: Die komplette Messhistorie steht
+    serverseitig gerendert in der Detailseite selbst, keine Nachladung nötig
+    (anders als das ähnlich aussehende RP-Portal).
+
+    Die EU-ID steht NICHT als eigenes Attribut im HTML, sondern nur als
+    Präfix in Download-Dateinamen (z.B.
+    ".../DEHE_PR_0031_Karte_Aartal_See.pdf") - über
+    r"DEHE_PR_(\\d{4})_" extrahiert, an mehreren Fundstellen auf jeder Seite
+    gegengeprüft (immer dieselbe Nummer). Manche Seiten haben gar keinen
+    Downloads-Bereich (z.B. Hattsteinweiher) - Rückfall dann auf Namensabgleich
+    gegen die EEA-Basis wie bei BE/NW (nur eindeutige Treffer).
+
+    Tabellenspalten: Datum, Wasser-Temperatur, Enterokokken, Escherichia-coli,
+    Bewertung der Probe (Icon, siehe HE_BEWERTUNG_AMPEL), Anmerkung. Alle
+    Jahres-Akkordeons der Seite werden eingelesen, genommen wird die zeitlich
+    letzte Zeile über alle Jahre hinweg (nicht nur das oberste/aktuelle Jahr).
     """
-    raise NotImplementedError()
+    r = hole(f"{HE_BASIS}/seen-nach-region")
+    seiten_pfade = sorted(set(re.findall(
+        r'href="(/badegewaesser/[a-z0-9-]+/[a-z0-9-]+)"', r.content.decode("utf-8"))))
+    if len(seiten_pfade) < 30:
+        raise ValueError(f"HE: nur {len(seiten_pfade)} Badeseen in der Übersicht gefunden")
+
+    def zahl(v: str):
+        try:
+            return float(str(v).replace(",", ".").replace("<", "").replace(">", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def probedatum(v: str) -> str | None:
+        m = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", v or "")
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
+    # Fallback für Seiten ohne Downloads-Bereich (kein DEHE_PR_... im HTML,
+    # z.B. Hattsteinweiher): Namensabgleich gegen die EEA-Basis wie bei BE/NW.
+    service = _eea_service_url()
+    layer_id = _eea_find_point_layer(service)
+    r2 = hole(f"{service}/{layer_id}/query", params={
+        "where": "countryCode='DE' AND bathingWaterIdentifier LIKE 'DEHE%'",
+        "outFields": "bathingWaterIdentifier,bathingWaterName",
+        "returnGeometry": "false", "f": "json", "resultRecordCount": 200,
+    })
+    kandidaten = [(a["bathingWaterIdentifier"], a["bathingWaterName"])
+                  for a in (f["attributes"] for f in r2.json().get("features", []))]
+
+    def finde_id_per_name(name: str):
+        ziel = _normalisiere(name)
+        bewertet = sorted(((len(ziel & _normalisiere(n)), eid) for eid, n in kandidaten), reverse=True)
+        if bewertet[0][0] > 0 and bewertet[0][0] > bewertet[1][0]:
+            return bewertet[0][1]
+        return None
+
+    out = []
+    for i, pfad in enumerate(seiten_pfade):
+        if i:
+            time.sleep(0.3)
+        seite = hole(f"{HE_BASIS}{pfad}").content.decode("utf-8")
+
+        name_m = re.search(r"Name der Badestelle</strong></div><div class=\"col-xs-6\">\s*([^<]+?)\s*</div>", seite)
+        name = html.unescape(name_m.group(1)).strip() if name_m else pfad.rsplit("/", 1)[-1].replace("-", " ").title()
+        ort_m = re.search(r"Gemeinde/Stadt</strong></div><div class=\"col-xs-6\">\s*([^<]+?)\s*</div>", seite)
+        ort = html.unescape(ort_m.group(1)).strip() if ort_m else None
+
+        m = re.search(r"DEHE_PR_(\d{4})_", seite)
+        eu_id = f"DEHE_PR_{m.group(1)}" if m else finde_id_per_name(name)
+        if not eu_id:
+            continue
+
+        zeilen = []
+        for tabelle in re.findall(r'<table class="messdaten[^"]*"[^>]*>([\s\S]*?)</table>', seite):
+            for tr in re.findall(r"<tr>([\s\S]*?)</tr>", tabelle):
+                tds = re.findall(r"<td[^>]*>([\s\S]*?)</td>", tr)
+                if len(tds) < 6:
+                    continue
+                datum = re.sub(r"<[^>]*>", "", tds[0]).strip()
+                if not probedatum(datum):
+                    continue
+                bew_m = re.search(r'alt="Bewertung (\d)"', tds[4])
+                zeilen.append({
+                    "datum": datum,
+                    "temp": html.unescape(re.sub(r"<[^>]*>", "", tds[1])).strip(),
+                    "entero": html.unescape(re.sub(r"<[^>]*>", "", tds[2])).strip(),
+                    "ecoli": html.unescape(re.sub(r"<[^>]*>", "", tds[3])).strip(),
+                    "bewertung": int(bew_m.group(1)) if bew_m else None,
+                    "anmerkung": html.unescape(re.sub(r"<[^>]*>", "", tds[5])).strip(),
+                })
+        if not zeilen:
+            continue
+        letzte = max(zeilen, key=lambda z: probedatum(z["datum"]) or "")
+
+        ecoli = zahl(letzte["ecoli"])
+        entero = zahl(letzte["entero"])
+        bewertung = letzte["bewertung"]
+
+        hinweise = []
+        if bewertung in HE_BEWERTUNG_TEXT:
+            hinweise.append({
+                "art": "warnung" if bewertung == 3 else "zustand",
+                "text": letzte["anmerkung"] or HE_BEWERTUNG_TEXT[bewertung],
+            })
+
+        out.append(stelle(
+            "HE", eu_id, name,
+            ort=ort,
+            vertrauen="berechnet" if (ecoli is not None and entero is not None) else "jahresnote",
+            ampel=HE_BEWERTUNG_AMPEL.get(bewertung, "unbekannt"),
+            probe=probedatum(letzte["datum"]),
+            ecoli=ecoli, entero=entero,
+            temperatur=zahl(letzte["temp"]),
+            hinweise=hinweise,
+            url=f"{HE_BASIS}{pfad}",
+        ))
+
+    if len(out) < 30:
+        raise ValueError(f"HE: nur {len(out)} Stellen zusammengebaut")
+    return out
 
 
 def konnektor_sn() -> list[dict]:
