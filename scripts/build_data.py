@@ -551,7 +551,12 @@ def konnektor_st() -> list[dict]:
         p = feat.get("properties") or {}
         c = (feat.get("geometry") or {}).get("coordinates") or [None, None]
         bgw_nr = p.get("BGW_NR")
-        if not bgw_nr:
+        if not bgw_nr or not p.get("GEWAESSER"):
+            # Ohne Gewässernamen bleibt außer der Kreis-Zuordnung nichts übrig
+            # (beobachtet bei BGW_NR 0026: alle Felder None bis auf LANDKREIS).
+            # name=bgw_nr würde sonst per verschmelze() den guten EEA-Namen
+            # überschreiben, weil eine nicht-leere Zeichenkette kein "leerer"
+            # Wert im Sinne von verschmelze() ist.
             continue
 
         ecoli = zahl(p.get("ESCHERICHIA_COLI"))
