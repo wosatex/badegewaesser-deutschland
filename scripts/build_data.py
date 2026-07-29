@@ -1552,13 +1552,147 @@ def konnektor_he() -> list[dict]:
     return out
 
 
+SN_MAPSERVER = ("https://geodienste.sachsen.de/ags-relay/ArcGISServer/guest/arcgis/rest/"
+                "services/kultur/rest_kultur_badegewaesser/MapServer/0")
+SN_SNIPPET = "https://www.gesunde.sachsen.de/lua/badegewaesser/{}-de-content.snippet"
+
+
+def _sn_tabellen(text: str) -> tuple[list, list]:
+    """Ein Badegewässer kann mehrere Probenstellen mit je eigener Vorort-
+    und Labor-Tabelle haben (z.B. Talsperre Pirk: 5 Stück). Gibt (labor,
+    vorort) zurück, je eine Liste von Zeilenlisten pro Probenstelle-Tabelle."""
+    labor, vorort = [], []
+    for titel, tab in re.findall(r"<caption>([^<]*)</caption>([\s\S]*?)</table>", text):
+        zeilen = []
+        for tr in re.findall(r"<tr>([\s\S]*?)</tr>", tab):
+            zellen = re.findall(r"<td[^>]*>([\s\S]*?)</td>", tr)
+            if not zellen:
+                continue
+            zeilen.append([html.unescape(re.sub(r"<[^>]*>", "", z)).strip() for z in zellen])
+        if not zeilen:
+            continue
+        (labor if "Labor" in titel else vorort).append(zeilen)
+    return labor, vorort
+
+
 def konnektor_sn() -> list[dict]:
     """
-    [TODO] gesunde.sachsen.de/badegewaesser.html.
-    Alternativ LUIS (luis.sachsen.de) prüfen — das LfULG bietet dort neben
-    WMS/WFS ausdrücklich auch REST-Feature-Services an.
+    Sachsen, 32 Badegewässer. Kein direkter WFS für Badegewässer bei LUIS
+    gefunden (nur allgemeine Gewässerthemen); gesunde.sachsen.de selbst lädt
+    seine Inhalte per Fetch aus /lua/<kategorie>/<datei>-de[-teil].snippet -
+    gefunden über den JS-Quelltext der Seite, nicht dokumentiert.
+
+    Stammdaten kommen aus einem ArcGIS-MapServer (Kartenebene der eingebetteten
+    Karte auf badegewaesser.html): SN_MAPSERVER liefert 32 Punkte mit
+    Landkreis, Gewässername, Status, einer Website-URL mit ?id=<bgxx####>
+    und - wichtig - "einschraenkung": die landesweite aktuelle Einschränkung
+    im Klartext (z.B. "keine Einschränkung"), direkt als hinweise nutzbar.
+
+    Die interne ID (bgvv2023 usw.) hat nichts mit der EEA-ID zu tun -
+    Zuordnung über Koordinaten (die hier amtlich vermessen sind, nicht wie
+    bei BE grob geschätzt): 31 von 32 Treffern unter 35 m, der einzige
+    Ausreißer (Speicherbecken Borna, 734 m) trotzdem eindeutig, weil die
+    zweitnächste Kandidatin über 7 km entfernt liegt.
+
+    Pro Badegewässer lädt .../<id>-de-content.snippet EIN HTML-Fragment mit
+    potenziell MEHREREN Probenstellen (eigene Vorort- und Labor-Tabelle je
+    Probenstelle). Genommen wird je Parameter das ungünstigste aktuelle
+    Ergebnis über alle Probenstellen hinweg (höchste Keimzahl, geringste
+    Sichttiefe) - ein Badesee mit einer schlechten und einer guten Stelle
+    soll nicht durch die gute Stelle beschönigt werden.
     """
-    raise NotImplementedError()
+    r = hole(f"{SN_MAPSERVER}/query", params={
+        "where": "1=1", "outFields": "*", "outSR": "4326",
+        "returnGeometry": "true", "f": "json",
+    })
+    stammdaten = r.json().get("features", [])
+    if len(stammdaten) < 15:
+        raise ValueError(f"SN: nur {len(stammdaten)} Badegewässer gefunden")
+
+    service = _eea_service_url()
+    layer_id = _eea_find_point_layer(service)
+    r2 = hole(f"{service}/{layer_id}/query", params={
+        "where": "countryCode='DE' AND bathingWaterIdentifier LIKE 'DESN%'",
+        "outFields": "bathingWaterIdentifier,longitude,latitude",
+        "returnGeometry": "false", "f": "json", "resultRecordCount": 200,
+    })
+    referenz = [(a["bathingWaterIdentifier"], a["latitude"], a["longitude"])
+                for a in (f["attributes"] for f in r2.json().get("features", []))]
+
+    def zahl(v: str):
+        try:
+            return float(str(v).replace(",", ".").replace("<", "").replace(">", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def probedatum(v: str) -> str | None:
+        m = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", v or "")
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
+    out = []
+    for i, f in enumerate(stammdaten):
+        if i:
+            time.sleep(0.3)
+        a = f["attributes"]
+        geom = f.get("geometry") or {}
+        lat, lon = geom.get("y"), geom.get("x")
+        m = re.search(r"[?&]id=([a-z0-9]+)", a.get("link3") or "")
+        if not lat or not lon or not m:
+            continue
+        treffer = _naechste_id(lat, lon, [(eid, la, lo, "") for eid, la, lo in referenz], max_m=1000.0)
+        if not treffer:
+            continue
+        eu_id = treffer[0]
+
+        try:
+            seite = hole(SN_SNIPPET.format(m.group(1))).content.decode("utf-8")
+        except Exception:
+            continue
+        labor, vorort = _sn_tabellen(seite)
+
+        ecoli = entero = probe = None
+        for tab in labor:
+            datenzeilen = [z for z in tab if len(z) >= 3 and probedatum(z[0])]
+            if not datenzeilen:
+                continue
+            letzte = max(datenzeilen, key=lambda z: probedatum(z[0]))
+            e_ent, e_col = zahl(letzte[1]), zahl(letzte[2])
+            if e_ent is not None:
+                entero = e_ent if entero is None else max(entero, e_ent)
+            if e_col is not None:
+                ecoli = e_col if ecoli is None else max(ecoli, e_col)
+            d = probedatum(letzte[0])
+            if d and (probe is None or d > probe):
+                probe = d
+
+        sichttiefe = None
+        for tab in vorort:
+            datenzeilen = [z for z in tab if len(z) >= 3 and probedatum(z[0])]
+            if not datenzeilen:
+                continue
+            letzte = max(datenzeilen, key=lambda z: probedatum(z[0]))
+            st = zahl(letzte[2])
+            if st is not None:
+                sichttiefe = st if sichttiefe is None else min(sichttiefe, st)
+
+        hinweise = []
+        einschraenkung = (a.get("einschraenkung") or "").strip()
+        if einschraenkung and "keine einschränkung" not in einschraenkung.lower():
+            hinweise.append({"art": "warnung", "text": einschraenkung})
+
+        out.append(stelle(
+            "SN", eu_id, (a.get("name4") or "").strip(),
+            ort=(a.get("name3") or "").strip() or None,
+            vertrauen="berechnet" if (ecoli is not None and entero is not None) else "jahresnote",
+            probe=probe,
+            ecoli=ecoli, entero=entero, sichttiefe=sichttiefe,
+            hinweise=hinweise,
+            url=a.get("link3"),
+        ))
+
+    if len(out) < 15:
+        raise ValueError(f"SN: nur {len(out)} Stellen zusammengebaut")
+    return out
 
 
 def konnektor_th() -> list[dict]:
