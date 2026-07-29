@@ -70,6 +70,17 @@ def hole(url: str, methode: str = "GET", **kw) -> requests.Response:
     return r
 
 
+def _plausible_temperatur(t):
+    """Schutz gegen Tippfehler der Quellen (z.B. "24,4" ohne Komma als "244"
+    übermittelt, beobachtet bei NW/Xanten-Wardt am 14.07.2026 und BW/Eppingen).
+    Deutsche Badegewässer liegen realistisch nie unter -2 oder über 40 °C -
+    ausserhalb wird der Wert verworfen statt geraten (kein Nachkommastellen-
+    Rateversuch, das wäre eine erfundene Zahl)."""
+    if t is None or t < -2 or t > 40:
+        return None
+    return t
+
+
 def stelle(land: str, sid: str, name: str, **kw) -> dict:
     """Normalisiertes Stelle-Objekt. Alle Konnektoren geben genau diese Struktur zurück."""
     return {
@@ -90,7 +101,7 @@ def stelle(land: str, sid: str, name: str, **kw) -> dict:
             "entero": kw.get("entero"),
             "chlorophyll": kw.get("chlorophyll"),
             "sichttiefe": kw.get("sichttiefe"),
-            "temperatur": kw.get("temperatur"),
+            "temperatur": _plausible_temperatur(kw.get("temperatur")),
         },
         "hinweise": kw.get("hinweise") or [],
         "url": kw.get("url"),

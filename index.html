@@ -10,6 +10,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Badewasser">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -167,15 +170,12 @@ body[data-demo="1"] .demo-flag{display:block}
 }
 .gauge__fill{
   height:100%;border-radius:99px;
-  background:linear-gradient(90deg,var(--deep),var(--mid) 45%,var(--shallow) 75%,var(--shore));
   width:0;transition:width .85s cubic-bezier(.22,.8,.24,1);
 }
-.spot[data-ampel="rot"] .gauge__fill{background:linear-gradient(90deg,#3a1610,var(--alarm))}
 .gauge__row{display:flex;align-items:baseline;justify-content:space-between;gap:.6rem;margin-top:.45rem}
 .gauge__score{font-family:var(--display);font-weight:700;font-size:1.5rem;line-height:1}
 .gauge__score small{font-family:var(--mono);font-size:.68rem;font-weight:400;color:var(--ink-3);margin-left:.2rem}
 .gauge__verdict{font-family:var(--mono);font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);text-align:right}
-.spot[data-ampel="rot"] .gauge__verdict{color:var(--alarm)}
 
 .official{
   display:inline-block;font-family:var(--mono);font-size:.72rem;
@@ -296,7 +296,7 @@ body[data-demo="1"] .demo-flag{display:block}
 
 <header class="masthead">
   <p class="masthead__kicker">Amtliche Daten der Länder</p>
-  <h1 class="masthead__title">Badewasser<span>Deutschland</span></h1>
+  <h1 class="masthead__title">Badegewässer<span>Deutschland</span></h1>
   <p class="masthead__meta">
     <span>Stand <b id="m-stand">–</b></span>
     <span><b id="m-count">–</b> Badestellen</span>
@@ -639,19 +639,16 @@ function hauptgrund(s){
   return s.einstufung ? `Einstufung: ${s.einstufung}` : "Auffällig eingestuft";
 }
 
-function hexZuRgb(h){ h = h.replace("#",""); return [0,2,4].map(i => parseInt(h.substr(i,2),16)); }
-function lerpFarbe(a,b,t){
-  const A = hexZuRgb(a), B = hexZuRgb(b);
-  return "#" + A.map((v,i) => Math.round(v + (B[i]-v)*t).toString(16).padStart(2,"0")).join("");
-}
-const SCORE_STOPS = [[0,"#0a2f43"],[45,"#0e5c5c"],[75,"#1c8a5f"],[100,"#35b37e"]];
+// Feste Farbzonen statt Verlauf: ein Verlauf, dessen Stopps sich auf die
+// eigene (mit dem Wert schrumpfende) Breite beziehen, zeigt am rechten Rand
+// jedes Balkens immer die letzte Verlaufsfarbe (Grün) -- unabhängig vom
+// tatsächlichen Wert. Grenzen decken sich mit urteil() (25/45/65/85).
+const SCORE_ZONEN = [[0,"#ff6b4a"],[25,"#ff9852"],[45,"#ffbe5a"],[65,"#1c8a5f"],[85,"#35b37e"]];
 function farbeBeiScore(p){
-  if(p < 25) return "#ff6b4a";
-  for(let i=0;i<SCORE_STOPS.length-1;i++){
-    const [p0,c0] = SCORE_STOPS[i], [p1,c1] = SCORE_STOPS[i+1];
-    if(p <= p1) return lerpFarbe(c0, c1, (p-p0)/(p1-p0));
-  }
-  return SCORE_STOPS[SCORE_STOPS.length-1][1];
+  if(p == null) return "#5d7f7c";
+  let f = SCORE_ZONEN[0][1];
+  for(const [schwelle, c] of SCORE_ZONEN) if(p >= schwelle) f = c;
+  return f;
 }
 function distKm(a,b,c,d){
   const R = 6371, rad = Math.PI/180;
@@ -697,10 +694,10 @@ function karteZeile(s){
 
     ${p !== null ? `
     <div class="gauge">
-      <div class="gauge__track"><div class="gauge__fill" data-w="${p}"></div></div>
+      <div class="gauge__track"><div class="gauge__fill" data-w="${p}" style="background:${farbeBeiScore(p)}"></div></div>
       <div class="gauge__row">
-        <span class="gauge__score">${p}<small>/100</small></span>
-        <span class="gauge__verdict">${esc(urteil(p))}</span>
+        <span class="gauge__score" style="color:${farbeBeiScore(p)}">${p}<small>/100</small></span>
+        <span class="gauge__verdict" style="color:${farbeBeiScore(p)}">${esc(urteil(p))}</span>
       </div>
     </div>` : `
     <div class="gauge">
@@ -897,9 +894,7 @@ async function zeichneKarte(treffer){
   treffer.forEach(s => {
     if(s.lat == null || s.lon == null) return;
     const p = bewerte(s);
-    const farbe = s.ampel === "rot" ? "#ff6b4a"
-                : s.ampel === "gelb" ? "#ffbe5a"
-                : p !== null && p < 65 ? "#ffbe5a" : "#35b37e";
+    const farbe = p != null ? farbeBeiScore(p) : EINSTUFUNG_FARBE[einstufungNorm(s.einstufung)];
     const mk = L.circleMarker([s.lat, s.lon], {
       radius:7, color:"#04141f", weight:2, fillColor:farbe, fillOpacity:.92
     }).bindPopup(
