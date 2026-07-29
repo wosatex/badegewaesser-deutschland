@@ -64,8 +64,8 @@ EU_PREFIX = {
 # Hilfsfunktionen
 # --------------------------------------------------------------------------
 
-def hole(url: str, **kw) -> requests.Response:
-    r = SESSION.get(url, timeout=TIMEOUT, **kw)
+def hole(url: str, methode: str = "GET", **kw) -> requests.Response:
+    r = SESSION.request(methode, url, timeout=TIMEOUT, **kw)
     r.raise_for_status()
     return r
 
@@ -1291,9 +1291,133 @@ def konnektor_ni() -> list[dict]:
     return out
 
 
+RP_BASIS = "https://badeseen.rlp-umwelt.de"
+
+RP_CYANO_WARNUNG = (
+    "Dominanz potentiell toxinbildender Cyanobakterien (Blaualgen)",
+    "Massenvermehrung von Cyanobakterien",
+)
+
+
+def _rp_tabelle(html_fragment: str) -> dict[str, list[str]]:
+    """Zerlegt die vom Land gelieferte Breit-Tabelle (Parameter als Zeilen,
+    Datum als Spalten, neuestes Datum zuerst) in {Parameter: [Werte je Spalte]}."""
+    kopf = re.search(r"<thead>([\s\S]*?)</thead>", html_fragment)
+    daten = re.findall(r"<th[^>]*>([\s\S]*?)</th>", kopf.group(1)) if kopf else []
+    spalten = [html.unescape(re.sub(r"<[^>]*>", "", d)).strip() for d in daten][1:]
+
+    zeilen: dict[str, list[str]] = {}
+    for tr in re.findall(r"<tr>([\s\S]*?)</tr>", html_fragment):
+        zellen = [html.unescape(re.sub(r"<[^>]*>", "", z)).strip()
+                  for z in re.findall(r"<td>([\s\S]*?)</td>", tr)]
+        if len(zellen) < 2:
+            continue
+        zeilen[zellen[0]] = zellen[1:]
+    return zeilen, spalten
+
+
 def konnektor_rp() -> list[dict]:
-    """[TODO] badeseen.rlp.de (LfU). Saison nur 1.6.–31.8., keine Fließgewässer."""
-    raise NotImplementedError()
+    """
+    Rheinland-Pfalz, 68 Badeseen. badeseen.rlp.de existiert nicht mehr (SSL-
+    Zertifikat passt nicht zum Hostnamen) - der Dienst ist umgezogen nach
+    badeseen.rlp-umwelt.de, gefunden per Suche, nicht per Redirect.
+
+    Kein FeatureServer/REST-Endpunkt, sondern eine TYPO3-Seite je Badesee
+    (z.B. /badegewaesser/eifel/gemuendener-maar) mit AJAX-nachgeladenen
+    Messwert-Tabellen. Pro Seite steht im HTML
+        <div class="api-data" data-key="DERP_PR_0022" data-uid="31286">
+    data-key ist die EEA-ID direkt (kein Matching nötig), data-uid der Content-
+    Element-Schlüssel für den AJAX-Aufruf:
+        POST /?getapidata=1&uid=<uid>&year=<jahr>&provider=provider1   E. coli,
+             Enterokokken, Wassertemperatur (die amtliche Laborprobe)
+        POST /?getapidata=1&uid=<uid>&year=<jahr>&provider=provider2   Sicht-
+             tiefe, Chlorophyll a, Cyanobakterien-Status, Beurteilung (die
+             häufigeren Vor-Ort-/Sonden-Checks)
+    Antwort ist JSON {"status":"success","message": "<JSON-String mit HTML>"}
+    - "message" muss ein zweites Mal mit json.loads dekodiert werden, danach
+    steht darin eine Breit-Tabelle (Parameter als Zeilen, Datum als Spalten,
+    neuestes Datum links) - siehe _rp_tabelle.
+
+    Manche Seiten haben data-key zweimal mit unterschiedlicher data-uid (eine
+    davon offenbar ein inaktiver/alter Akkordeon-Block) - genommen wird die
+    erste im Dokument, das ist im Browser nachweislich die, die die Seite
+    selbst per AJAX lädt.
+
+    probe/Vertrauen richten sich nach provider1 (der amtlichen Laborprobe);
+    Sichttiefe/Chlorophyll aus provider2 fließen zusätzlich ein, auch wenn ihr
+    Datum abweicht (häufigere Vor-Ort-Checks) - das ändert nichts an probe.
+    """
+    r = hole(f"{RP_BASIS}/badegewaesser/alle-badegewaesser")
+    seiten_pfade = sorted(set(re.findall(
+        r'href="(/badegewaesser/[a-z0-9-]+/[a-z0-9-]+)"', r.content.decode("utf-8"))))
+    if len(seiten_pfade) < 30:
+        raise ValueError(f"RP: nur {len(seiten_pfade)} Badeseen in der Übersicht gefunden")
+
+    jahr = datetime.now().year
+
+    def zahl(v: str):
+        try:
+            return float(str(v).replace(",", ".").replace("<", "").replace(">", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    out = []
+    for i, pfad in enumerate(seiten_pfade):
+        if i:
+            time.sleep(0.3)
+        seite = hole(f"{RP_BASIS}{pfad}").content.decode("utf-8")
+        m = re.search(r'data-key="(DERP_PR_\d+)" data-uid="(\d+)"', seite)
+        if not m:
+            continue
+        eu_id, uid = m.group(1), m.group(2)
+        name = pfad.rsplit("/", 1)[-1].replace("-", " ").strip().title()
+        titel = re.search(r"<title>([^<]+)</title>", seite)
+        if titel:
+            name = html.unescape(titel.group(1).split(" . ")[0]).strip()
+
+        p1 = hole(f"{RP_BASIS}/", methode="POST",
+                  params={"getapidata": 1, "uid": uid, "year": jahr, "provider": "provider1"})
+        p2 = hole(f"{RP_BASIS}/", methode="POST",
+                  params={"getapidata": 1, "uid": uid, "year": jahr, "provider": "provider2"})
+
+        zeilen1, spalten1 = _rp_tabelle(json.loads(p1.json().get("message", '""')))
+        zeilen2, _ = _rp_tabelle(json.loads(p2.json().get("message", '""')))
+
+        ecoli = zahl((zeilen1.get("Escherichia coli (KBE/100 ml)") or [None])[0])
+        entero = zahl((zeilen1.get("Enterokokken (KBE/100 ml)") or [None])[0])
+        temp = zahl((zeilen1.get("Wassertemp. (°C)") or zeilen2.get("Wassertemp. (°C)") or [None])[0])
+        sicht_cm = zahl((zeilen2.get("Phytoplankton- (Algen-) entwicklung (als Sichttiefe in cm)") or [None])[0])
+        chla = zahl((zeilen2.get("Chlorophyll a (µg/L, optische Sonde)") or [None])[0])
+        beurteilung = (zeilen2.get("Beurteilung") or [None])[0]
+
+        probe = None
+        if spalten1:
+            pm = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", spalten1[0])
+            if pm:
+                probe = f"{pm.group(3)}-{pm.group(2)}-{pm.group(1)}"
+
+        hinweise = []
+        for feld in RP_CYANO_WARNUNG:
+            wert = (zeilen2.get(feld) or [""])[0].strip().lower()
+            if wert in ("ja", "yes"):
+                hinweise.append({"art": "warnung", "text": f"{feld}: {wert}"})
+        if beurteilung and "ohne beanstandung" not in beurteilung.lower():
+            hinweise.append({"art": "zustand", "text": beurteilung})
+
+        out.append(stelle(
+            "RP", eu_id, name,
+            vertrauen="berechnet" if (ecoli is not None and entero is not None) else "jahresnote",
+            probe=probe,
+            ecoli=ecoli, entero=entero, temperatur=temp,
+            chlorophyll=chla,
+            sichttiefe=(sicht_cm / 100 if sicht_cm is not None else None),
+            hinweise=hinweise,
+            url=f"{RP_BASIS}{pfad}",
+        ))
+
+    if len(out) < 30:
+        raise ValueError(f"RP: nur {len(out)} Stellen zusammengebaut")
+    return out
 
 
 def konnektor_he() -> list[dict]:
