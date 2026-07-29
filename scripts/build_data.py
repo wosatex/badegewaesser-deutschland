@@ -29,6 +29,7 @@ Verifikationsstand
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import math
 import os
@@ -584,26 +585,301 @@ def konnektor_st() -> list[dict]:
 
 
 # ==========================================================================
-# BE / BB — bestehende Konnektoren einhängen
+# BE / BB — aus der Vorgänger-App (github.com/wosatex/badestellen) portiert
 # ==========================================================================
+
+BE_CSV_URL = "https://www.data.lageso.de/baden/00_History_gesamt/History.csv"
+BE_SEITE = "https://www.berlin.de/lageso/gesundheit/gesundheitsschutz/badegewaesser/liste-der-badestellen/"
+
+# Lageso liefert selbst keine Koordinaten. Kartenpunkte aus der Vorgänger-App
+# (dort von Hand recherchiert) — nicht amtlich, aber die einzige verfügbare
+# Ortsangabe. Kein Messwert, keine Gesundheitsdaten, daher unproblematisch.
+BE_KOORDINATEN = {
+    "Sandhauser Straße": (52.5578, 13.2075),
+    "Bürgerablage": (52.5624, 13.213),
+    "Tegeler See, Strandbad": (52.5836, 13.262),
+    "Tegeler See, gegenüber Scharfenberg": (52.59, 13.2545),
+    "Tegeler See, gegenüber Reiswerder": (52.5866, 13.2503),
+    "Tegeler See, Saatwinkel": (52.5716, 13.2565),
+    "Tegeler See, Reiherwerder": (52.5878, 13.2676),
+    "Kleine Badewiese": (52.4869, 13.1907),
+    "Grunewaldturm": (52.493, 13.1936),
+    "Lieper Bucht": (52.4826, 13.1866),
+    "Radfahrerwiese": (52.47, 13.183),
+    "Breitehorn": (52.4563, 13.1747),
+    "Große Steinlanke": (52.4402, 13.1781),
+    "Alter Hof": (52.4341, 13.1836),
+    "Wannsee, Strandbad": (52.4356, 13.1783),
+    "Teufelssee": (52.4752, 13.234),
+    "Krumme Lanke": (52.4404, 13.234),
+    "Schlachtensee": (52.4381, 13.2132),
+    "Kleiner Müggelsee": (52.4401, 13.618),
+    "Müggelsee, Strandbad": (52.4342, 13.652),
+    "Friedrichshagen, Strandbad": (52.4468, 13.6272),
+    "Schmöckwitz": (52.3727, 13.6424),
+    "Seddinsee": (52.3806, 13.6603),
+    "Große Krampe": (52.4021, 13.648),
+    "Bammelecke": (52.3903, 13.642),
+    "Grünau, Strandbad": (52.4133, 13.5763),
+    "Wendenschloss, Strandbad": (52.4328, 13.578),
+    "Gartenstraße, Flussbad": (52.456, 13.582),
+    "Dämeritzsee": (52.4288, 13.682),
+    "Orankesee, Strandbad": (52.5528, 13.4702),
+    "Weißensee, Strandbad": (52.556, 13.4642),
+    "Plötzensee, Strandbad": (52.5443, 13.3352),
+    "Flughafensee": (52.5718, 13.3022),
+    "Jungfernheide, Strandbad": (52.539, 13.276),
+    "Heiligensee, Strandbad": (52.6048, 13.2352),
+    "Lübars, Strandbad (Ziegeleisee)": (52.61, 13.3618),
+    "Halensee, Strandbad": (52.493, 13.29),
+    "Groß Glienicker See, nördlich": (52.4702, 13.1128),
+    "Groß Glienicker See, südlich": (52.4632, 13.113),
+}
+
+# Generische Wörter, die beim Namensabgleich gegen die EEA-Basis ignoriert
+# werden (siehe _be_finde_id) — sonst matchen z.B. alle "Tegeler See"-Stellen
+# gleich gut auf "SEE".
+BE_STOPWOERTER = {"STRANDBAD", "SEE", "FREIBAD", "SEEBAD", "SEEBADEANSTALT",
+                  "BADEWIESE", "UNTERHAVEL", "OBERHAVEL"}
+
+
+def _normalisiere(s: str) -> set[str]:
+    s = s.upper().replace("Ä", "AE").replace("Ö", "OE").replace("Ü", "UE").replace("ß", "SS")
+    s = re.sub(r"[^A-Z0-9]+", " ", s).strip()
+    return set(s.split())
+
+
+def _be_eea_namen() -> list[tuple[str, str]]:
+    service = _eea_service_url()
+    layer_id = _eea_find_point_layer(service)
+    r = hole(f"{service}/{layer_id}/query", params={
+        "where": "countryCode='DE' AND bathingWaterIdentifier LIKE 'DEBE%'",
+        "outFields": "bathingWaterIdentifier,bathingWaterName",
+        "returnGeometry": "false", "f": "json", "resultRecordCount": 200,
+    })
+    return [(a["bathingWaterIdentifier"], a["bathingWaterName"])
+            for a in (f["attributes"] for f in r.json().get("features", []))]
+
+
+def _be_finde_id(name: str, kandidaten: list[tuple[str, str]]) -> str:
+    ziel = _normalisiere(name)
+    kern_ziel = ziel - BE_STOPWOERTER or ziel
+
+    def punkte(eea_name: str):
+        kandidat = _normalisiere(eea_name)
+        kern = kandidat - BE_STOPWOERTER or kandidat
+        return (len(kern_ziel & kern), len(ziel & kandidat))
+
+    return max(kandidaten, key=lambda k: punkte(k[1]))[0]
+
 
 def konnektor_be() -> list[dict]:
     """
-    [TODO] Berlin, Lageso-CSV je Badestelle mit allen Messwerten der Saison.
-    Hier den bereits funktionierenden Code aus der Vorgänger-App einsetzen und
-    das Ergebnis auf stelle() abbilden — vertrauen="berechnet", weil E. coli,
-    Enterokokken, Chlorophyll a, Sichttiefe und coliforme Bakterien vorliegen.
+    Berlin, 38 Badestellen. Lageso-CSV mit der gesamten Saisonhistorie, eine
+    Zeile je Messung; genommen wird pro Badestelle die zeitlich letzte.
+
+    ACHTUNG Encoding-Falle: Der Server deklariert (und requests erkennt)
+    ISO-8859-1, die Bytes sind aber tatsächlich UTF-8 (geprüft: "Straße"
+    kommt als 0xC3 0x9F, nicht 0xDF). r.text/r.encoding liefern deshalb
+    Datenmüll ("StraÃ\\x9fe") - r.content explizit als UTF-8 dekodieren.
+
+    Spalten (Semikolon-getrennt, 11 Stück, Kopfzeile nur zur Validierung):
+    BadName;Prob_Datum;Escherichia coli;Intestinale Enterokokken;Coliforme
+    Bakterien;Sichttiefe;Cyanobakterien Chl a;Wassertemperatur;Aktuelle
+    Warnhinweise;Weitere Informationen;Farbe.
+
+    Farbe ist bereits Lageso-eigene Tagesampel (gruen/gelb/rot) - direkt als
+    ampel übernehmen, nicht aus einer Einstufung ableiten. Coliforme
+    Bakterien haben im Datenvertrag kein Feld (nur ecoli/entero/chlorophyll/
+    sichttiefe/temperatur) und werden nicht mitgeführt - das ist im
+    ursprünglichen Scoring der Vorgänger-App ohnehin nur ein Nebenfaktor.
+
+    Lageso liefert weder Koordinaten noch eine amtliche ID. Koordinaten
+    kommen aus BE_KOORDINATEN (Vorgänger-App), die ID aus einem Namensabgleich
+    gegen die EEA-Basis (_be_finde_id) - Koordinaten-Matching wie bei HH
+    scheitert hier, weil BE_KOORDINATEN nur grobe Kartenpunkte sind, keine
+    amtlichen Positionen (manche >1 km von der echten Lage entfernt).
     """
-    raise NotImplementedError("Bestehenden Lageso-Konnektor hier einhängen")
+    text = hole(BE_CSV_URL).content.decode("utf-8")
+    zeilen = [z for z in text.replace("\r", "").split("\n") if z.strip()]
+    if not zeilen or "BadName" not in zeilen[0]:
+        raise ValueError("Berlin: unerwarteter CSV-Kopf")
+
+    def zahl(v):
+        s = str(v or "").strip()
+        if not s or s == "-" or re.fullmatch(r"n\.?\s?a\.?", s, re.I):
+            return None
+        m = re.match(r"^([<>])?\s*([\d.,]+)", s)
+        if not m:
+            return None
+        n = re.sub(r"\.(?=\d{3}\b)", "", m.group(2)).replace(",", ".")
+        try:
+            return float(n)
+        except ValueError:
+            return None
+
+    def probedatum(v: str) -> str | None:
+        m = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", v or "")
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
+    je_name: dict[str, list[list[str]]] = {}
+    for z in zeilen[1:]:
+        f = z.split(";")
+        if len(f) < 11 or not probedatum(f[1]):
+            continue
+        je_name.setdefault(f[0].strip(), []).append(f)
+
+    if len(je_name) < 20:
+        raise ValueError(f"Berlin: nur {len(je_name)} Badestellen gelesen")
+
+    kandidaten = _be_eea_namen()
+    out = []
+    for name, rows in je_name.items():
+        rows.sort(key=lambda f: probedatum(f[1]))
+        letzte = rows[-1]
+        ecoli, entero = zahl(letzte[2]), zahl(letzte[3])
+        warn, info, farbe = letzte[8].strip(), letzte[9].strip(), letzte[10].strip().lower()
+
+        hinweise = []
+        if warn and warn.lower() != "keine":
+            hinweise.append({"art": "warnung", "text": warn})
+        if info and info.lower() != "keine":
+            hinweise.append({"art": "zustand", "text": info})
+
+        ampel = "gruen" if farbe.startswith(("gruen", "grün")) else \
+                "gelb" if farbe.startswith("gelb") else \
+                "rot" if farbe.startswith("rot") else "unbekannt"
+        lat, lon = BE_KOORDINATEN.get(name, (None, None))
+
+        out.append(stelle(
+            "BE", _be_finde_id(name, kandidaten), name,
+            lat=lat, lon=lon,
+            vertrauen="berechnet" if (ecoli is not None and entero is not None) else "jahresnote",
+            ampel=ampel,
+            probe=probedatum(letzte[1]),
+            ecoli=ecoli, entero=entero,
+            chlorophyll=zahl(letzte[6]),
+            sichttiefe=zahl(letzte[5]),
+            temperatur=zahl(letzte[7]),
+            hinweise=hinweise,
+            url=BE_SEITE,
+        ))
+    return out
+
+
+BB_KML_URL = "https://badestellen.brandenburg.de/web/badestellen/badestellen/-/export/badestellen.kml"
+BB_SEITE = "https://badestellen.brandenburg.de/"
+_bb_detail = "https://badestellen.brandenburg.de/badestelle/-/details/{}".format
+
+# Textbausteine aus dem Feld "remarks", die auf ein echtes Baderisiko
+# hindeuten statt auf Ausstattung/Auszeichnung ("Blaue Flagge",
+# "Barrierefreies Bad" o.ä.) - siehe Docstring unten.
+BB_RISIKO_WOERTER = re.compile(
+    r"nicht baden|badeverbot|blaualgen|algen|dermatitis|sichttiefe|"
+    r"geogen|verschmutzung|trüb", re.I)
 
 
 def konnektor_bb() -> list[dict]:
     """
-    [TODO] Brandenburg, KML-Export des LAVG: Messdatum, Wassertemperatur,
-    Sichttiefe, Bemerkung, fünfstufige Beurteilung — aber keine Keimzahlen.
-    Deshalb vertrauen="amtlich" und url= auf die Detailseite setzen.
+    Brandenburg, 253 Badestellen. KML mit <ExtendedData><Data name="…"> je
+    Placemark — deutlich einfacher zu parsen als die alte HTML-Beschreibung
+    im <description>-Feld (die bleibt hier ungenutzt).
+
+    Felder: lastMeasurementDate, temperature, visibilityDepth, remarks,
+    bodyOfWater, name (nur der Ortsteil, z.B. "Bralitz" - der volle Name
+    steht im <name>-Tag als "Ort, Gewässer"), bacteriology (Text, KEINE
+    Zahlen: "keine Beanstandungen" / "mikrobiologisch zu beanstanden" / "-"),
+    bnr (amtliche Nummer, siehe unten).
+
+    bnr → ID: bnr="4" + Land "BB" ergibt DEBB_PR_0004, geprüft gegen die
+    EEA-Basis (bnr 4 = "Joachimsthal, Feriendorf" = DEBB_PR_0004
+    "GRIMNITZSEE JOACHIMSTHAL FERIENDORF").
+
+    "smiley"/styleUrl (evaluation1-5, icons level0-5.png) NICHT gemappt:
+    94 % aller Stellen sind evaluation1, aber auch etliche evaluation2/3-
+    Stellen haben bacteriology="keine Beanstandungen" - die Skala korreliert
+    nicht sauber mit Keimbelastung, sondern mit "rating" (vermutlich eine
+    allgemeine Zustands-/Ausstattungsnote). Ohne offizielle Legende wäre das
+    Raten an der einzigen Stelle, die am wichtigsten ist (ampel). EEA liefert
+    die geprüfte Jahreseinstufung, die reicht hier.
+
+    remarks ist echter Klartext und wird gefiltert: Treffer auf
+    BB_RISIKO_WOERTER → hinweise als "warnung" (bestätigt am Beispiel "Alt
+    Zeschdorf, Hohenjesarscher See": remarks "Empfehlung - nicht baden!" bei
+    smiley=evaluation3, einziger Fund dieser Art). Alles andere (Blaue
+    Flagge, Barrierefreies Bad, Steilstrand, …) als "zustand" - das sind
+    Ausstattungs-/Zugangshinweise, keine Gesundheitswarnung.
+
+    Keine Keimzahlen in dieser Quelle (bacteriology ist Text, keine KBE-
+    Werte) → vertrauen bleibt "amtlich", nie "berechnet".
     """
-    raise NotImplementedError("Bestehenden LAVG-Konnektor hier einhängen")
+    text = hole(BB_KML_URL).content.decode("utf-8")
+    if "<Placemark" not in text:
+        raise ValueError("Brandenburg: kein Placemark im KML")
+
+    def feld(pm: str, name: str) -> str:
+        m = re.search(rf'<Data name="{name}">\s*<value>([\s\S]*?)</value>', pm)
+        if not m:
+            return ""
+        wert = html.unescape(m.group(1))
+        wert = re.sub(r"<[^>]*>", " ", wert)
+        wert = re.sub(r"\s+", " ", wert).strip()
+        return "" if wert == "-" else wert
+
+    def zahl(v: str):
+        m = re.match(r"^([\d.,]+)", (v or "").strip())
+        if not m:
+            return None
+        try:
+            return float(m.group(1).replace(",", "."))
+        except ValueError:
+            return None
+
+    def probedatum(v: str) -> str | None:
+        m = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", v or "")
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
+    out = []
+    for pm in re.findall(r"<Placemark\b[\s\S]*?</Placemark>", text):
+        bnr = feld(pm, "bnr")
+        if not bnr or not bnr.isdigit():
+            continue
+
+        c = re.search(r"<coordinates>([^<]*)</coordinates>", pm)
+        teile = (c.group(1).split(",") if c else [])
+        lon = float(teile[0]) if len(teile) > 0 and teile[0].strip() else None
+        lat = float(teile[1]) if len(teile) > 1 and teile[1].strip() else None
+
+        ort = feld(pm, "name")
+        gewaesser = feld(pm, "bodyOfWater")
+        name = f"{ort}, {gewaesser}" if ort and gewaesser else (gewaesser or ort)
+
+        remarks = feld(pm, "remarks")
+        bakteriologie = feld(pm, "bacteriology")
+        hinweise = []
+        if remarks:
+            hinweise.append({
+                "art": "warnung" if BB_RISIKO_WOERTER.search(remarks) else "zustand",
+                "text": remarks,
+            })
+        if bakteriologie and "beanstand" in bakteriologie.lower() and "keine" not in bakteriologie.lower():
+            hinweise.append({"art": "warnung", "text": bakteriologie})
+
+        out.append(stelle(
+            "BB", f"DEBB_PR_{int(bnr):04d}", name,
+            gewaesser=gewaesser or None, ort=ort or None,
+            lat=lat, lon=lon,
+            vertrauen="amtlich",
+            probe=probedatum(feld(pm, "lastMeasurementDate")),
+            temperatur=zahl(feld(pm, "temperature")),
+            sichttiefe=zahl(feld(pm, "visibilityDepth")),
+            hinweise=hinweise,
+            url=_bb_detail(bnr),
+        ))
+
+    if len(out) < 20:
+        raise ValueError(f"Brandenburg: nur {len(out)} Badestellen gelesen")
+    return out
 
 
 # ==========================================================================
