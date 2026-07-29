@@ -506,6 +506,14 @@ function gefiltert(){
   }).sort((a,b) => (a.name||"").localeCompare(b.name||"","de"));
 }
 
+// Cyanobakterien (Blaualgen) können für Hunde schon durch Schlecken am Fell
+// oder wenig Schlucken giftig bis lebensgefährlich sein - ab 10 µg/l
+// Chlorophyll a (UBA-Leitwert "auffällig") wird deshalb gewarnt.
+function hundeHinweis(chlorophyll){
+  if(chlorophyll == null || chlorophyll < 10) return null;
+  return "Für Hunde giftig: Blaualgen (Cyanobakterien) können bei Hunden schon durch Schlecken am Fell oder wenig Schlucken zu schweren Vergiftungen führen. Tiere hier nicht schwimmen oder trinken lassen und das Fell danach gründlich abspülen.";
+}
+
 function karteZeile(s){
   const p = bewerte(s);
   const alter = tageHer(s.probe);
@@ -516,6 +524,10 @@ function karteZeile(s){
   if(m.chlorophyll != null) messungen.push(["Chlorophyll a", m.chlorophyll + " µg/l"]);
   if(m.sichttiefe != null)  messungen.push(["Sichttiefe", m.sichttiefe + " m"]);
   if(m.temperatur != null)  messungen.push(["Wasser", m.temperatur + " °C"]);
+
+  const hinweise = [...(s.hinweise||[])];
+  const hundeText = hundeHinweis(m.chlorophyll);
+  if(hundeText) hinweise.push({art:"warnung", text:hundeText});
 
   const stufeText = { berechnet:"berechnet", amtlich:"amtliche Einstufung", jahresnote:"nur Jahresnote" }[s.vertrauen] || s.vertrauen;
 
@@ -544,7 +556,7 @@ function karteZeile(s){
     ${messungen.length ? `<ul class="readings">${messungen.map(([k,v]) =>
       `<li><dt>${esc(k)}</dt><dd>${esc(v)}</dd></li>`).join("")}</ul>` : ""}
 
-    ${(s.hinweise||[]).length ? `<ul class="notes">${s.hinweise.map(h =>
+    ${hinweise.length ? `<ul class="notes">${hinweise.map(h =>
       `<li data-art="${esc(h.art)}">${esc(h.text)}</li>`).join("")}</ul>` : ""}
 
     <div class="spot__foot">

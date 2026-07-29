@@ -146,6 +146,12 @@ def _eea_find_point_layer(service_url: str) -> int:
     return (bevorzugt or punkte)[0]["id"]
 
 
+EEA_EINSTUFUNG_DE = {
+    "excellent": "ausgezeichnet", "good": "gut",
+    "sufficient": "ausreichend", "poor": "mangelhaft",
+}
+
+
 def konnektor_eea() -> list[dict]:
     """
     Basis für alle 16 Länder. EEA-ArcGIS-REST, aktuellster jährlicher Dienst
@@ -197,6 +203,13 @@ def konnektor_eea() -> list[dict]:
             eins = p.get("qualityStatus")
             if eins == "Not classified":
                 eins = None
+            elif eins:
+                # EEA liefert Englisch; die restliche App (Frontend-CSS,
+                # andere Konnektoren) erwartet Deutsch (ausgezeichnet/gut/
+                # ausreichend/mangelhaft) - ohne Übersetzung bekämen "Poor"/
+                # "Sufficient" nie die rote/gelbe Hervorhebung im Frontend,
+                # weil data-e="mangelhaft"/"ausreichend" nicht träfe.
+                eins = EEA_EINSTUFUNG_DE.get(eins.lower(), eins)
 
             stellen.append(stelle(
                 land, str(bwid), p.get("bathingWaterName") or str(bwid),
