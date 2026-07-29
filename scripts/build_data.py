@@ -891,15 +891,114 @@ def konnektor_bb() -> list[dict]:
 # KATEGORIE B / C — Portale bekannt, Endpunkt noch zu ermitteln
 # ==========================================================================
 
+BW_BASE = "https://services-eu1.arcgis.com/1U6wr24jYkiSRBIK/arcgis/rest/services"
+
+
 def konnektor_bw() -> list[dict]:
     """
-    [TODO] badegewaesserkarte.landbw.de
-    Der URL-Parameter ?data_id=dataSource_17-Gesamt_UVB_BGW_2577:257 ist die
-    Signatur von ArcGIS Experience Builder. Netzwerk-Tab öffnen, XHR-Requests
-    mitlesen -> darunter liegt ein FeatureServer mit /query?f=geojson.
-    Dann konnektor_st() als Vorlage kopieren.
+    Baden-Württemberg, 334 Badestellen. ArcGIS Experience Builder lädt seine
+    FeatureServer-URLs aus einem JSON-Config, nicht sichtbar im normalen
+    Netzwerk-Log dieses Environments (XHR der Kartenbibliothek wurde nicht
+    mitgeschnitten) - gefunden, indem cdn/13/config.json direkt abgerufen und
+    nach "FeatureServer" durchsucht wurde. Zwei Dienste werden gebraucht:
+
+      Badegewaesser/FeatureServer/0      Stammdaten + Koordinaten (WGS84_X/Y
+                                          schon in Grad, keine Umrechnung
+                                          nötig) + aktuelle Meldung, 334
+                                          Zeilen, passt in eine Abfrage.
+      Gesamt_UVB_Messdaten_Tabelle/FeatureServer/0
+                                          reine Tabelle (kein Geometrie-Feld),
+                                          23000+ Einzelproben seit Jahren,
+                                          BW_ID/PROBE_DATUM/MESS_COLI/
+                                          MESS_ENTEROK/TEMPERATUR. Komplett
+                                          paginiert geladen (maxRecordCount
+                                          2000) und die je BW_ID letzte Probe
+                                          client-seitig bestimmt - eine
+                                          serverseitige Aggregation (groupBy
+                                          + max) würde nur das Datum liefern,
+                                          nicht die Messwerte der dazugehörigen
+                                          Zeile.
+
+    BW_ID ("DEBW_PR_0007") ist identisch mit der EEA-ID, kein Matching nötig.
+
+    AKTUELL_BADEVERBOT ist 1 (kein Verbot) oder 2 (aktives Verbot/Hinweis) -
+    geprüft an zwei echten Fällen (Wassermangel, Sanierungsarbeiten). Bei 2
+    liefert AKTUELL_MELDUNG den Text; ohne Text ein neutrales Label.
+
+    SICHTTIEFE auf der Stammdaten-Ebene ist eine grobe Bandbreite fürs Profil
+    ("> 2 - 5 m"), keine datierte Einzelmessung - bewusst NICHT auf
+    messwerte.sichttiefe gemappt, das wäre eine Sichttiefen-Zahl ohne Bezug
+    zu einem Messdatum vorgetäuscht.
     """
-    raise NotImplementedError("FeatureServer-URL aus dem Netzwerk-Tab ziehen")
+    r = hole(f"{BW_BASE}/Badegewaesser/FeatureServer/0/query", params={
+        "where": "1=1",
+        "outFields": "BW_ID,BADEGEWAESSERNAME,GEWAESSERNAME,GEMEINDE_NAME,"
+                     "WGS84_X,WGS84_Y,AKTUELL_MELDUNG,AKTUELL_BADEVERBOT,URL",
+        "returnGeometry": "false", "f": "json", "resultRecordCount": 2000,
+    })
+    stammdaten = r.json().get("features", [])
+    if len(stammdaten) < 100:
+        raise ValueError(f"BW: nur {len(stammdaten)} Stammdaten-Zeilen gelesen")
+
+    neuste_probe: dict[str, dict] = {}
+    offset = 0
+    while True:
+        r = hole(f"{BW_BASE}/Gesamt_UVB_Messdaten_Tabelle/FeatureServer/0/query", params={
+            "where": "1=1",
+            "outFields": "BW_ID,PROBE_DATUM,MESS_COLI,MESS_ENTEROK,TEMPERATUR",
+            "resultOffset": offset, "resultRecordCount": 2000, "f": "json",
+        })
+        seite = r.json().get("features", [])
+        if not seite:
+            break
+        for f in seite:
+            a = f["attributes"]
+            bw_id, datum = a.get("BW_ID"), a.get("PROBE_DATUM")
+            if not bw_id or not datum:
+                continue
+            bisher = neuste_probe.get(bw_id)
+            if not bisher or datum > bisher["PROBE_DATUM"]:
+                neuste_probe[bw_id] = a
+        if len(seite) < 2000:
+            break
+        offset += len(seite)
+        time.sleep(0.3)
+
+    out = []
+    for f in stammdaten:
+        a = f["attributes"]
+        bw_id = a.get("BW_ID")
+        if not bw_id:
+            continue
+
+        probe = neuste_probe.get(bw_id)
+        ecoli = probe.get("MESS_COLI") if probe else None
+        entero = probe.get("MESS_ENTEROK") if probe else None
+
+        hinweise = []
+        if a.get("AKTUELL_BADEVERBOT") == 2:
+            meldung = (a.get("AKTUELL_MELDUNG") or "").strip()
+            hinweise.append({
+                "art": "warnung",
+                "text": meldung or "Amtlicher Hinweis/Badeverbot (siehe Verweislink)",
+            })
+
+        out.append(stelle(
+            "BW", bw_id, a.get("BADEGEWAESSERNAME") or bw_id,
+            gewaesser=a.get("GEWAESSERNAME"), ort=a.get("GEMEINDE_NAME"),
+            lat=a.get("WGS84_Y"), lon=a.get("WGS84_X"),
+            vertrauen="berechnet" if (ecoli is not None and entero is not None) else "jahresnote",
+            probe=(datetime.fromtimestamp(probe["PROBE_DATUM"] / 1000, tz=timezone.utc)
+                   .strftime("%Y-%m-%d") if probe else None),
+            ecoli=ecoli, entero=entero,
+            temperatur=(probe or {}).get("TEMPERATUR"),
+            hinweise=hinweise,
+            url=a.get("URL"),
+        ))
+
+    if len(out) < 100:
+        raise ValueError(f"BW: nur {len(out)} Badestellen zusammengebaut")
+    return out
 
 
 def konnektor_nw() -> list[dict]:
