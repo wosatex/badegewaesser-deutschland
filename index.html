@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Badewasser Deutschland</title>
+<title>Badegewässer Deutschland</title>
 <meta name="description" content="Wasserqualität der amtlich überwachten Badestellen in Deutschland. Amtliche Daten der Länder, täglich zusammengeführt.">
 <meta name="theme-color" content="#04141f">
 <meta name="color-scheme" content="dark">
@@ -211,8 +211,14 @@ body[data-demo="1"] .demo-flag{display:block}
 
 /* ---------- Karte / Zustände ---------- */
 #map{height:min(66vh,560px);margin:.6rem var(--pad) 2rem;border-radius:var(--r);border:1px solid var(--line);background:var(--deep)}
-.leaflet-popup-content-wrapper{background:var(--deep);color:var(--ink);border-radius:10px}
-.leaflet-popup-tip{background:var(--deep)}
+#map .leaflet-popup-content-wrapper{background:var(--deep);color:var(--ink);border-radius:10px}
+#map .leaflet-popup-tip{background:var(--deep)}
+#map .leaflet-popup-close-button{color:var(--ink-2)}
+.map-pop{font-family:var(--body);font-size:.82rem;line-height:1.4}
+.map-pop small{color:var(--ink-2)}
+.map-pop__btn{display:block;width:100%;margin-top:.5rem;padding:.4rem .6rem;border-radius:7px;
+  border:1px solid var(--line);background:linear-gradient(120deg,var(--mid),var(--shallow));
+  color:#fff;font-family:var(--mono);font-size:.7rem;cursor:pointer}
 
 .state{padding:3rem var(--pad);text-align:center;color:var(--ink-2)}
 .state h2{font-family:var(--display);font-size:1.2rem;margin:0 0 .4rem;color:var(--ink)}
@@ -889,6 +895,13 @@ async function zeichneKarte(treffer){
       maxZoom:18, attribution:'&copy; OpenStreetMap'
     }).addTo(S.karte);
     S.marker = L.layerGroup().addTo(S.karte);
+    // Leaflet stoppt Klicks innerhalb eines Popups, damit sie nicht als
+    // Kartenklick durchschlagen - der globale Klick-Delegator sieht den
+    // "Zur Liste"-Knopf deshalb nie, hier extra binden.
+    S.karte.on("popupopen", e => {
+      const btn = e.popup.getElement()?.querySelector("[data-jump]");
+      if(btn) btn.addEventListener("click", () => springeZu(btn.dataset.jump));
+    });
   }
   S.marker.clearLayers();
   const punkte = [];
@@ -899,9 +912,12 @@ async function zeichneKarte(treffer){
     const mk = L.circleMarker([s.lat, s.lon], {
       radius:7, color:"#04141f", weight:2, fillColor:farbe, fillOpacity:.92
     }).bindPopup(
-      `<b>${esc(s.name)}</b><br>${esc(s.gewaesser||"")}<br>` +
+      `<div class="map-pop">
+        <b>${esc(s.name)}</b><br>${esc(s.gewaesser||"")}<br>` +
       (p !== null ? `${p}/100 — ${esc(urteil(p))}` : esc(s.einstufung || "keine Einstufung")) +
-      `<br><small>Probe ${fmtDatum(s.probe)}</small>`
+      `<br><small>Probe ${fmtDatum(s.probe)}</small>
+        <button type="button" class="map-pop__btn" data-jump="${esc(s.id)}">Zur Liste</button>
+      </div>`
     );
     S.marker.addLayer(mk);
     punkte.push([s.lat, s.lon]);
