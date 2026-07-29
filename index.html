@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Badewasser Deutschland</title>
+<meta name="description" content="Wasserqualität der amtlich überwachten Badestellen in Deutschland. Amtliche Daten der Länder, täglich zusammengeführt.">
+<meta name="theme-color" content="#04141f">
+<meta name="color-scheme" content="dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Badewasser">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   Farbachse laut Brief: dunkelblau -> grün.
+   Gelesen als Tiefenprofil: tiefes Wasser dunkel, Flachwasser
+   am Ufer grün. Der Verlauf kodiert damit Daten, statt zu
+   dekorieren -- der Pegelbalken ist die Punktzahl.
+   ============================================================ */
+:root{
+  --abyss:#04141f;
+  --deep:#0a2f43;
+  --mid:#0e5c5c;
+  --shallow:#1c8a5f;
+  --shore:#35b37e;
+  --foam:#7fe3b4;
+
+  --alarm:#ff6b4a;      /* einzige Farbe außerhalb der Achse: Badeverbot muss schreien */
+  --alarm-dim:#4a2018;
+
+  --ink:#eaf5f2;
+  --ink-2:#9fbcb6;
+  --ink-3:#5d7f7c;
+  --line:rgba(127,227,180,.14);
+  --card:rgba(10,47,67,.42);
+
+  --display:"Space Grotesk",system-ui,sans-serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",monospace;
+
+  --pad:clamp(1rem,4vw,2rem);
+  --r:14px;
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--abyss);
+  color:var(--ink);
+  font-family:var(--body);
+  font-size:16px;
+  line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+  min-height:100dvh;
+  padding-bottom:env(safe-area-inset-bottom);
+}
+button,select,input{font:inherit;color:inherit}
+a{color:var(--foam)}
+:focus-visible{outline:2px solid var(--foam);outline-offset:3px;border-radius:4px}
+
+/* ---------- Masthead ---------- */
+.masthead{
+  position:relative;
+  padding:calc(var(--pad) + env(safe-area-inset-top)) var(--pad) 1.6rem;
+  background:linear-gradient(168deg,var(--abyss) 0%,var(--deep) 34%,var(--mid) 68%,var(--shallow) 100%);
+  overflow:hidden;
+}
+.masthead::after{
+  content:"";position:absolute;inset:auto 0 -1px 0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--foam),transparent);opacity:.5;
+}
+.masthead__kicker{
+  font-family:var(--mono);font-size:.72rem;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--foam);opacity:.8;margin:0 0 .35rem;
+}
+.masthead__title{
+  font-family:var(--display);font-weight:700;
+  font-size:clamp(2.1rem,9vw,3.4rem);line-height:.95;letter-spacing:-.03em;
+  margin:0 0 .7rem;
+}
+.masthead__title span{display:block;color:var(--foam);font-weight:500}
+.masthead__meta{
+  font-family:var(--mono);font-size:.78rem;color:var(--ink-2);
+  margin:0;display:flex;flex-wrap:wrap;gap:.4rem .9rem;
+}
+.masthead__meta b{color:var(--ink);font-weight:600}
+
+/* ---------- Demo-Banner ---------- */
+.demo-flag{
+  display:none;margin:0;padding:.7rem var(--pad);
+  background:var(--alarm-dim);border-top:1px solid var(--alarm);border-bottom:1px solid var(--alarm);
+  font-family:var(--mono);font-size:.78rem;color:#ffd9cf;
+}
+.demo-flag b{color:var(--alarm)}
+body[data-demo="1"] .demo-flag{display:block}
+
+/* ---------- Steuerung ---------- */
+.controls{
+  position:sticky;top:0;z-index:40;
+  background:rgba(4,20,31,.93);
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--line);
+  padding:.8rem var(--pad);
+  display:grid;gap:.6rem;
+  grid-template-columns:1fr;
+}
+@media(min-width:640px){.controls{grid-template-columns:minmax(190px,1fr) 2fr auto;align-items:center}}
+
+.field{position:relative;display:block}
+.field__label{
+  position:absolute;left:.85rem;top:.34rem;
+  font-family:var(--mono);font-size:.6rem;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-3);pointer-events:none;
+}
+.field select,.field input{
+  width:100%;appearance:none;-webkit-appearance:none;
+  background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+  padding:1.3rem .85rem .5rem;
+  color:var(--ink);
+}
+.field select{background-image:linear-gradient(45deg,transparent 50%,var(--foam) 50%),linear-gradient(135deg,var(--foam) 50%,transparent 50%);
+  background-position:calc(100% - 20px) 60%,calc(100% - 14px) 60%;
+  background-size:6px 6px,6px 6px;background-repeat:no-repeat;padding-right:2.4rem;}
+.field select option{background:var(--deep);color:var(--ink)}
+.field input::placeholder{color:var(--ink-3)}
+
+.viewtabs{display:flex;gap:.3rem;background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:.25rem}
+.viewtabs button{
+  flex:1;background:none;border:0;border-radius:10px;padding:.55rem .9rem;cursor:pointer;
+  font-family:var(--mono);font-size:.76rem;letter-spacing:.06em;color:var(--ink-2);
+}
+.viewtabs button[aria-pressed="true"]{background:linear-gradient(120deg,var(--mid),var(--shallow));color:#fff}
+
+/* ---------- Ergebniszeile ---------- */
+.tally{
+  padding:.9rem var(--pad) .2rem;
+  font-family:var(--mono);font-size:.76rem;color:var(--ink-3);
+  display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;
+}
+
+/* ---------- Liste ---------- */
+.list{list-style:none;margin:0;padding:.6rem var(--pad) 3rem;display:grid;gap:.7rem}
+@media(min-width:820px){.list{grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}}
+
+.spot{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+  padding:.95rem 1rem 1.05rem;position:relative;
+}
+.spot[data-ampel="rot"]{border-color:rgba(255,107,74,.55)}
+.spot__head{display:flex;justify-content:space-between;align-items:flex-start;gap:.8rem}
+.spot__name{font-family:var(--display);font-weight:700;font-size:1.06rem;line-height:1.2;margin:0;letter-spacing:-.01em}
+.spot__where{margin:.2rem 0 0;font-size:.83rem;color:var(--ink-2)}
+.spot__land{
+  flex:none;font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;
+  border:1px solid var(--line);border-radius:6px;padding:.2rem .4rem;color:var(--ink-2);
+}
+
+/* ---------- Signatur: der Pegel ---------- */
+.gauge{margin:.85rem 0 .45rem}
+.gauge__track{
+  height:10px;border-radius:99px;background:rgba(4,20,31,.75);
+  border:1px solid var(--line);overflow:hidden;position:relative;
+}
+.gauge__fill{
+  height:100%;border-radius:99px;
+  background:linear-gradient(90deg,var(--deep),var(--mid) 45%,var(--shallow) 75%,var(--shore));
+  width:0;transition:width .85s cubic-bezier(.22,.8,.24,1);
+}
+.spot[data-ampel="rot"] .gauge__fill{background:linear-gradient(90deg,#3a1610,var(--alarm))}
+.gauge__row{display:flex;align-items:baseline;justify-content:space-between;gap:.6rem;margin-top:.45rem}
+.gauge__score{font-family:var(--display);font-weight:700;font-size:1.5rem;line-height:1}
+.gauge__score small{font-family:var(--mono);font-size:.68rem;font-weight:400;color:var(--ink-3);margin-left:.2rem}
+.gauge__verdict{font-family:var(--mono);font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);text-align:right}
+.spot[data-ampel="rot"] .gauge__verdict{color:var(--alarm)}
+
+.official{
+  display:inline-block;font-family:var(--mono);font-size:.72rem;
+  padding:.25rem .5rem;border-radius:6px;margin:.15rem 0 0;
+  background:rgba(28,138,95,.16);border:1px solid rgba(53,179,126,.4);color:var(--foam);
+}
+.official[data-e="mangelhaft"]{background:rgba(255,107,74,.14);border-color:rgba(255,107,74,.5);color:#ffb5a2}
+.official[data-e="ausreichend"]{background:rgba(255,190,90,.12);border-color:rgba(255,190,90,.4);color:#ffd79a}
+.official[data-e="keine"]{background:rgba(93,127,124,.14);border-color:var(--line);color:var(--ink-2)}
+
+.readings{
+  list-style:none;margin:.75rem 0 0;padding:0;
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:.45rem;
+  font-family:var(--mono);font-size:.72rem;
+}
+.readings li{background:rgba(4,20,31,.5);border:1px solid var(--line);border-radius:8px;padding:.35rem .45rem}
+.readings dt{color:var(--ink-3);font-size:.62rem;letter-spacing:.06em;text-transform:uppercase;margin:0}
+.readings dd{margin:.12rem 0 0;color:var(--ink)}
+
+.notes{list-style:none;margin:.7rem 0 0;padding:0;display:grid;gap:.35rem}
+.notes li{
+  font-size:.8rem;padding:.45rem .6rem;border-radius:8px;
+  background:rgba(255,190,90,.09);border-left:3px solid rgba(255,190,90,.6);color:#ffe3b8;
+}
+.notes li[data-art="warnung"]{background:rgba(255,107,74,.12);border-left-color:var(--alarm);color:#ffcabb}
+
+.spot__foot{
+  margin-top:.8rem;padding-top:.65rem;border-top:1px solid var(--line);
+  display:flex;justify-content:space-between;align-items:center;gap:.6rem;
+  font-family:var(--mono);font-size:.7rem;color:var(--ink-3);flex-wrap:wrap;
+}
+.spot__foot a{text-decoration:none;border-bottom:1px solid rgba(127,227,180,.35)}
+
+/* ---------- Karte / Zustände ---------- */
+#map{height:min(66vh,560px);margin:.6rem var(--pad) 2rem;border-radius:var(--r);border:1px solid var(--line);background:var(--deep)}
+.leaflet-popup-content-wrapper{background:var(--deep);color:var(--ink);border-radius:10px}
+.leaflet-popup-tip{background:var(--deep)}
+
+.state{padding:3rem var(--pad);text-align:center;color:var(--ink-2)}
+.state h2{font-family:var(--display);font-size:1.2rem;margin:0 0 .4rem;color:var(--ink)}
+.state p{margin:0 auto;max-width:38ch;font-size:.9rem}
+.hidden{display:none !important}
+
+/* ---------- Methodik ---------- */
+.method{margin:0;padding:0 var(--pad) 3rem;color:var(--ink-2);font-size:.87rem}
+.method>summary{
+  cursor:pointer;font-family:var(--mono);font-size:.76rem;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--foam);padding:.9rem 0;border-top:1px solid var(--line);
+}
+.method h3{font-family:var(--display);font-size:1rem;color:var(--ink);margin:1.2rem 0 .35rem}
+.method ul{padding-left:1.1rem;margin:.4rem 0}
+.method li{margin:.2rem 0}
+.method code{font-family:var(--mono);font-size:.85em;color:var(--foam)}
+.disclaimer{
+  margin:1.4rem 0 0;padding:.9rem 1rem;border-radius:var(--r);
+  background:rgba(255,107,74,.08);border:1px solid rgba(255,107,74,.28);color:#ffcabb;font-size:.84rem;
+}
+
+@media(prefers-reduced-motion:reduce){
+  .gauge__fill{transition:none}
+  *{scroll-behavior:auto}
+}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <p class="masthead__kicker">Amtliche Daten der Länder</p>
+  <h1 class="masthead__title">Badewasser<span>Deutschland</span></h1>
+  <p class="masthead__meta">
+    <span>Stand <b id="m-stand">–</b></span>
+    <span><b id="m-count">–</b> Badestellen</span>
+    <span><b id="m-laender">–</b> Länder</span>
+  </p>
+</header>
+
+<p class="demo-flag">
+  <b>Demo-Daten.</b> Diese Ansicht zeigt erfundene Beispielwerte für frei erfundene Badestellen,
+  damit die Oberfläche ohne Datenabruf prüfbar ist. Sobald <code>data/badestellen.json</code>
+  vom Aggregator geschrieben wurde, verschwindet dieser Hinweis.
+</p>
+
+<div class="controls">
+  <label class="field">
+    <span class="field__label">Bundesland</span>
+    <select id="f-land"></select>
+  </label>
+  <label class="field">
+    <span class="field__label">Badestelle oder Ort</span>
+    <input id="f-suche" type="search" placeholder="z. B. Seename, Gemeinde" autocomplete="off">
+  </label>
+  <div class="viewtabs" role="group" aria-label="Ansicht wechseln">
+    <button id="v-liste" aria-pressed="true">Liste</button>
+    <button id="v-karte" aria-pressed="false">Karte</button>
+  </div>
+</div>
+
+<p class="tally">
+  <span id="tally-text">Wird geladen …</span>
+  <span id="tally-conf"></span>
+</p>
+
+<ul class="list" id="liste"></ul>
+<div id="map" class="hidden"></div>
+
+<div class="state hidden" id="leer">
+  <h2>Keine Badestelle gefunden</h2>
+  <p>Anderes Bundesland wählen oder den Suchbegriff kürzen.</p>
+</div>
+
+<details class="method">
+  <summary>Wie die Zahl entsteht</summary>
+
+  <p>Die Länder liefern unterschiedlich viel. Deshalb gibt es nicht eine Zahl für alle,
+     sondern drei Stufen — eine gemeinsame Zahl wäre eine Scheingenauigkeit.</p>
+
+  <h3>Berechnet</h3>
+  <p>Wo Einzelmesswerte maschinenlesbar vorliegen, startet jede Stelle bei 100. Abgezogen wird für:</p>
+  <ul>
+    <li><b>E. coli und intestinale Enterokokken</b> — gestaffelt nach der EU-Badegewässerrichtlinie
+        (2006/7/EG), getrennte Schwellen für Binnen- und Küstengewässer, bis 48 Punkte</li>
+    <li><b>Blaualgen</b> als Chlorophyll a, nach den UBA-Leitwerten 40 und 100 µg/l, bis 42 Punkte</li>
+    <li><b>Sichttiefe</b> — bis 18 Punkte unter 0,5 m</li>
+    <li><b>Amtliche Warnhinweise</b> 18 Punkte, ein Zustandshinweis 5 Punkte</li>
+  </ul>
+  <p>Die amtliche Ampel begrenzt das Ergebnis: bei <b>gelb</b> höchstens 58 Punkte, bei <b>rot</b>
+     höchstens 25. Die Bewertung fällt also nie besser aus als die des Amts.</p>
+
+  <h3>Amtlich</h3>
+  <p>Liefert ein Land nur die Beurteilung ohne Keimzahlen, steht die amtliche Einstufung unverändert
+     da und die Karte verlinkt für die Laborwerte auf die Detailseite der Behörde.</p>
+
+  <h3>Nur Jahresnote</h3>
+  <p>Wo während der Saison nichts Maschinenlesbares veröffentlicht wird — in Bayern etwa liegen die
+     aktuellen Ergebnisse bei bis zu 96 Kreisverwaltungsbehörden — zeigt die App die EU-Einstufung
+     aus dem Berichtsjahr. Die ist eine Rückschau über vier Saisons, keine Aussage über heute.</p>
+
+  <h3>Beprobungsrhythmus</h3>
+  <p>Berlin misst alle ein bis zwei Wochen, Brandenburg alle zwei bis vier, die meisten übrigen
+     Länder alle vier Wochen. Das Alter der Probe steht deshalb an jeder Stelle einzeln.
+     Auch die Saison endet unterschiedlich: Rheinland-Pfalz am 31. August,
+     Mecklenburg-Vorpommern erst am 10. September.</p>
+
+  <div class="disclaimer">
+    Messwerte sind eine Momentaufnahme. Nach Starkregen oder in Hitzeperioden kann sich die Lage
+    innerhalb von Stunden ändern; an Flussbadestellen in Nordrhein-Westfalen löst schon eine
+    Tagesniederschlagssumme über 5 mm ein automatisches Badeverbot aus. Entfernungen sind Luftlinie
+    und ungefähr. Diese Skala ist eine Lesehilfe, keine Behördenauskunft — vor Ort gilt immer das
+    Hinweisschild und die Auskunft des Gesundheitsamts.
+  </div>
+</details>
+
+<script>
+"use strict";
+
+/* ============================================================
+   1 — Stammdaten der Länder
+   ============================================================ */
+const LAENDER = {
+  BW:"Baden-Württemberg", BY:"Bayern", BE:"Berlin", BB:"Brandenburg",
+  HB:"Bremen", HH:"Hamburg", HE:"Hessen", MV:"Mecklenburg-Vorpommern",
+  NI:"Niedersachsen", NW:"Nordrhein-Westfalen", RP:"Rheinland-Pfalz",
+  SL:"Saarland", SN:"Sachsen", ST:"Sachsen-Anhalt",
+  SH:"Schleswig-Holstein", TH:"Thüringen"
+};
+
+/* ============================================================
+   2 — Bewertung (Portierung der Berlin-Logik, um Küstenwerte
+       und einen Typ-Schalter erweitert)
+   ============================================================ */
+const GRENZEN = {
+  binnen:{ ecoli:[100,500,1000,1800], entero:[50,200,400,700] },
+  kueste:{ ecoli:[50,250,500,1000],   entero:[25,100,200,400] }
+};
+const ABZUG = [0,6,14,20,24];
+
+function stufenAbzug(wert, schwellen){
+  if(wert === null || wert === undefined || isNaN(wert)) return 0;
+  for(let i=0;i<schwellen.length;i++) if(wert <= schwellen[i]) return ABZUG[i];
+  return ABZUG[4];
+}
+
+function bewerte(s){
+  if(s.vertrauen !== "berechnet") return null;
+  const m = s.messwerte || {};
+  const g = GRENZEN[s.typ === "kueste" ? "kueste" : "binnen"];
+  let p = 100;
+
+  p -= stufenAbzug(m.ecoli,  g.ecoli);
+  p -= stufenAbzug(m.entero, g.entero);
+
+  const c = m.chlorophyll;
+  if(c != null){ p -= c <= 20 ? 0 : c <= 40 ? 10 : c <= 100 ? 26 : 42; }
+
+  const t = m.sichttiefe;
+  if(t != null){ p -= t >= 1 ? 0 : t >= .5 ? 6 : t >= .3 ? 12 : 18; }
+
+  for(const h of (s.hinweise || [])) p -= h.art === "warnung" ? 18 : 5;
+
+  if(s.ampel === "gelb") p = Math.min(p, 58);
+  if(s.ampel === "rot")  p = Math.min(p, 25);
+
+  return Math.max(0, Math.min(100, Math.round(p)));
+}
+
+function urteil(p){
+  if(p === null) return "";
+  if(p >= 85) return "unbedenklich";
+  if(p >= 65) return "brauchbar";
+  if(p >= 45) return "auffällig";
+  if(p >= 25) return "bedenklich";
+  return "nicht baden";
+}
+
+/* ============================================================
+   3 — Speicher: versucht localStorage, fällt sonst auf den
+       Arbeitsspeicher zurück (Vorschau-Umgebungen, Privatmodus)
+   ============================================================ */
+const Cache = (() => {
+  const mem = {};
+  const KEY = "badewasser-de-v1";
+  return {
+    lese(){
+      try{ const v = window.localStorage.getItem(KEY); return v ? JSON.parse(v) : mem[KEY] || null; }
+      catch(e){ return mem[KEY] || null; }
+    },
+    schreibe(d){
+      try{ window.localStorage.setItem(KEY, JSON.stringify(d)); }
+      catch(e){ mem[KEY] = d; }
+    }
+  };
+})();
+
+/* ============================================================
+   4 — Demo-Daten (erfundene Orte, erfundene Werte)
+       Nur damit die Oberfläche ohne Netz prüfbar ist.
+   ============================================================ */
+const DEMO_SEED = [
+  // land, name, gewässer, ort, typ, lat, lon, ecoli, entero, chl, sicht, temp, ampel, einstufung, probe, vertrauen, hinweis
+  ["BE","Beispielsee Nord (Demo)","Beispielsee","Musterbezirk","binnen",52.49,13.42,28,9,18,1.6,22.4,"gruen","ausgezeichnet","2026-07-25","berechnet",null],
+  ["BE","Musterbucht Süd (Demo)","Beispielsee","Musterbezirk","binnen",52.43,13.51,410,180,64,0.7,23.1,"gelb","gut","2026-07-24","berechnet",["zustand","Erhöhte Chlorophyllwerte beobachtet."]],
+  ["BB","Demoteich West (Demo)","Demoteich","Musterdorf","binnen",52.21,13.05,null,null,null,1.2,21.8,"gruen","ausgezeichnet","2026-07-22","amtlich",null],
+  ["BB","Platzhaltersee (Demo)","Platzhaltersee","Beispielheide","binnen",53.02,13.61,null,null,null,0.4,22.9,"rot","ausreichend","2026-07-21","amtlich",["warnung","Badeverbot wegen Blaualgen."]],
+  ["SH","Musterstrand Ost (Demo)","Ostsee","Beispielkoog","kueste",54.41,10.39,14,6,null,2.1,18.6,"gruen","ausgezeichnet","2026-07-26","berechnet",null],
+  ["SH","Demokoog West (Demo)","Nordsee","Musterhafen","kueste",54.12,8.86,190,84,null,0.9,17.9,"gruen","gut","2026-07-25","berechnet",null],
+  ["MV","Beispielhaff (Demo)","Ostsee","Musterort","kueste",54.09,13.77,32,11,null,1.8,19.4,"gruen","ausgezeichnet","2026-07-24","berechnet",["zustand","Vibrionen-Monitoring läuft."]],
+  ["MV","Demosee Mitte (Demo)","Demosee","Musterseeland","binnen",53.51,12.68,120,42,26,1.4,22.7,"gruen","ausgezeichnet","2026-07-23","berechnet",null],
+  ["HH","Musterkanal-Bad (Demo)","Musterkanal","Beispielviertel","binnen",53.57,10.01,240,95,31,1.1,21.2,"gruen","gut","2026-07-25","berechnet",null],
+  ["HH","Demoweiher (Demo)","Demoweiher","Musterbezirk","binnen",53.62,9.94,55,18,null,1.5,21.8,"gruen","ausgezeichnet","2026-07-24","berechnet",null],
+  ["ST","Platzhaltertalsperre (Demo)","Platzhaltertalsperre","Beispielheim","binnen",51.72,11.31,88,26,14,2.2,20.9,"gruen","ausgezeichnet","2026-07-22","berechnet",null],
+  ["ST","Demokiesgrube (Demo)","Demokiesgrube","Musterstadt","binnen",51.95,11.62,null,null,null,null,null,"gruen","gut","2026-07-20","amtlich",null],
+  ["BW","Beispielweiher Süd (Demo)","Beispielweiher","Mustertal","binnen",47.98,9.21,66,21,22,1.7,21.5,"gruen","ausgezeichnet","2026-07-23","berechnet",null],
+  ["BW","Demobaggersee (Demo)","Demobaggersee","Beispielheim","binnen",48.72,9.14,null,null,null,null,null,"gelb","gut","2026-07-19","amtlich",["zustand","Sichttiefe eingeschränkt."]],
+  ["NW","Musterbaggersee (Demo)","Musterbaggersee","Beispielhausen","binnen",51.42,7.11,140,48,19,1.3,22.1,"gruen","ausgezeichnet","2026-07-24","berechnet",null],
+  ["NW","Demo-Flussbadestelle (Demo)","Musterfluss","Beispielfurt","binnen",51.08,6.92,null,null,null,null,null,"rot","ausreichend","2026-07-26","amtlich",["warnung","Automatisches Badeverbot nach Niederschlag."]],
+  ["RP","Beispielmaar (Demo)","Beispielmaar","Musterberg","binnen",50.11,6.75,null,null,null,null,null,"gruen","ausgezeichnet","2026-07-18","amtlich",null],
+  ["RP","Demostrandbad (Demo)","Demosee","Beispielau","binnen",49.32,8.31,null,null,null,null,null,"gelb","gut","2026-07-17","amtlich",["zustand","Cyanobakterien im Anstieg."]],
+  ["NI","Musterdeich-Bad (Demo)","Nordsee","Beispielsiel","kueste",53.68,7.19,null,null,null,null,null,"gruen","ausgezeichnet","2026-07-21","amtlich",null],
+  ["NI","Demotalsperre (Demo)","Demotalsperre","Musterharz","binnen",51.85,10.42,null,null,null,null,null,"gruen","gut","2026-07-20","amtlich",null],
+  ["HE","Beispielstausee (Demo)","Beispielstausee","Musterwald","binnen",51.16,9.02,null,null,null,null,null,"gruen","ausgezeichnet","2026-07-19","amtlich",null],
+  ["HE","Demoweiher Ost (Demo)","Demoweiher","Beispielbach","binnen",50.02,8.71,null,null,null,null,null,"gelb","gut","2026-07-18","amtlich",["zustand","Badestelle wegen Algen beobachtet."]],
+  ["SN","Musterspeicher (Demo)","Musterspeicher","Beispielgrund","binnen",51.13,13.71,null,null,null,null,null,"gruen","ausgezeichnet","2026-07-17","amtlich",null],
+  ["SN","Demotagebausee (Demo)","Demotagebausee","Musterheide","binnen",51.48,14.11,null,null,null,null,null,"gruen","gut","2026-07-16","amtlich",null],
+  ["TH","Beispielstausee Nord (Demo)","Beispielstausee","Musterthal","binnen",50.72,11.31,null,null,null,null,null,"gruen","ausgezeichnet","2026-07-15","amtlich",null],
+  ["TH","Demowaldbad (Demo)","Demoteich","Beispielrode","binnen",50.91,10.62,null,null,null,null,null,"gruen","gut","2026-07-15","amtlich",null],
+  ["HB","Musterbadesee (Demo)","Musterbadesee","Beispielstadt","binnen",53.11,8.79,71,24,null,1.4,22.6,"gruen","ausgezeichnet","2026-07-26","berechnet",null],
+  ["HB","Demoufer an der Beispielweser (Demo)","Beispielweser","Musterviertel","binnen",53.07,8.78,null,null,null,null,20.8,"gelb","ausreichend","2026-07-24","amtlich",["zustand","Strömung, Baden auf eigene Gefahr."]],
+  ["SL","Musterstausee Nord (Demo)","Musterstausee","Beispielweiler","binnen",49.56,7.06,null,null,null,null,null,"gruen","ausgezeichnet","2026-07-14","jahresnote",null],
+  ["SL","Demostrandbad West (Demo)","Musterstausee","Beispielweiler","binnen",49.55,7.04,null,null,null,null,null,"gruen","ausgezeichnet","2026-07-14","jahresnote",null],
+  ["BY","Beispielsee Nord (Demo)","Beispielsee","Musterwinkel","binnen",47.91,11.31,null,null,null,null,null,"unbekannt","ausgezeichnet",null,"jahresnote",null],
+  ["BY","Demoweiher am Musterberg (Demo)","Demoweiher","Musterberg","binnen",48.41,12.02,null,null,null,null,null,"unbekannt","gut",null,"jahresnote",null]
+];
+
+function demoDaten(){
+  return {
+    stand:new Date().toISOString(),
+    demo:true,
+    stellen:DEMO_SEED.map((r,i)=>({
+      id:`DEMO_${r[0]}_${String(i).padStart(3,"0")}`,
+      land:r[0], name:r[1], gewaesser:r[2], ort:r[3], typ:r[4],
+      lat:r[5], lon:r[6],
+      messwerte:{ ecoli:r[7], entero:r[8], chlorophyll:r[9], sichttiefe:r[10], temperatur:r[11] },
+      ampel:r[12], einstufung:r[13], probe:r[14], vertrauen:r[15],
+      hinweise:r[16] ? [{art:r[16][0], text:r[16][1]}] : [],
+      url:null
+    }))
+  };
+}
+
+/* ============================================================
+   5 — Zustand & Rendering
+   ============================================================ */
+const S = { daten:null, ansicht:"liste", land:"", suche:"", karte:null, marker:null };
+
+const el = id => document.getElementById(id);
+const fmtDatum = iso => {
+  if(!iso) return "kein Datum";
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit",year:"numeric"});
+};
+const tageHer = iso => {
+  if(!iso) return null;
+  const d = new Date(iso); if(isNaN(d)) return null;
+  return Math.floor((Date.now() - d.getTime()) / 86400000);
+};
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function fuelleDropdown(){
+  const sel = el("f-land");
+  const vorhanden = new Set(S.daten.stellen.map(s => s.land));
+  const opts = ['<option value="">Alle Bundesländer</option>'];
+  Object.entries(LAENDER)
+    .filter(([k]) => vorhanden.has(k))
+    .sort((a,b) => a[1].localeCompare(b[1],"de"))
+    .forEach(([k,v]) => {
+      const n = S.daten.stellen.filter(s => s.land === k).length;
+      opts.push(`<option value="${k}">${esc(v)} (${n})</option>`);
+    });
+  sel.innerHTML = opts.join("");
+}
+
+function gefiltert(){
+  const q = S.suche.trim().toLowerCase();
+  return S.daten.stellen.filter(s => {
+    if(S.land && s.land !== S.land) return false;
+    if(!q) return true;
+    return [s.name, s.ort, s.gewaesser].some(v => (v||"").toLowerCase().includes(q));
+  }).sort((a,b) => (a.name||"").localeCompare(b.name||"","de"));
+}
+
+function karteZeile(s){
+  const p = bewerte(s);
+  const alter = tageHer(s.probe);
+  const messungen = [];
+  const m = s.messwerte || {};
+  if(m.ecoli != null)       messungen.push(["E. coli", m.ecoli + " KBE"]);
+  if(m.entero != null)      messungen.push(["Enterokokken", m.entero + " KBE"]);
+  if(m.chlorophyll != null) messungen.push(["Chlorophyll a", m.chlorophyll + " µg/l"]);
+  if(m.sichttiefe != null)  messungen.push(["Sichttiefe", m.sichttiefe + " m"]);
+  if(m.temperatur != null)  messungen.push(["Wasser", m.temperatur + " °C"]);
+
+  const stufeText = { berechnet:"berechnet", amtlich:"amtliche Einstufung", jahresnote:"nur Jahresnote" }[s.vertrauen] || s.vertrauen;
+
+  return `
+  <li class="spot" data-ampel="${esc(s.ampel||"unbekannt")}">
+    <div class="spot__head">
+      <div>
+        <h2 class="spot__name">${esc(s.name)}</h2>
+        <p class="spot__where">${esc(s.gewaesser||"")}${s.ort ? " · " + esc(s.ort) : ""}</p>
+      </div>
+      <span class="spot__land">${esc(s.land)}</span>
+    </div>
+
+    ${p !== null ? `
+    <div class="gauge">
+      <div class="gauge__track"><div class="gauge__fill" data-w="${p}"></div></div>
+      <div class="gauge__row">
+        <span class="gauge__score">${p}<small>/100</small></span>
+        <span class="gauge__verdict">${esc(urteil(p))}</span>
+      </div>
+    </div>` : `
+    <div class="gauge">
+      <span class="official" data-e="${esc(s.einstufung||"keine")}">${esc(s.einstufung || "keine Einstufung")}</span>
+    </div>`}
+
+    ${messungen.length ? `<ul class="readings">${messungen.map(([k,v]) =>
+      `<li><dt>${esc(k)}</dt><dd>${esc(v)}</dd></li>`).join("")}</ul>` : ""}
+
+    ${(s.hinweise||[]).length ? `<ul class="notes">${s.hinweise.map(h =>
+      `<li data-art="${esc(h.art)}">${esc(h.text)}</li>`).join("")}</ul>` : ""}
+
+    <div class="spot__foot">
+      <span>${esc(stufeText)} · Probe ${fmtDatum(s.probe)}${alter !== null ? ` (${alter} T.)` : ""}</span>
+      ${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">Amtliche Seite</a>` : ""}
+    </div>
+  </li>`;
+}
+
+function zeichne(){
+  const treffer = gefiltert();
+  const liste = el("liste");
+  const leer = el("leer");
+
+  const zaehler = { berechnet:0, amtlich:0, jahresnote:0 };
+  treffer.forEach(s => { if(zaehler[s.vertrauen] !== undefined) zaehler[s.vertrauen]++; });
+
+  el("tally-text").textContent = treffer.length === 0
+    ? "Keine Treffer"
+    : `${treffer.length} ${treffer.length === 1 ? "Badestelle" : "Badestellen"}`;
+  el("tally-conf").textContent = treffer.length
+    ? `${zaehler.berechnet} berechnet · ${zaehler.amtlich} amtlich · ${zaehler.jahresnote} Jahresnote`
+    : "";
+
+  leer.classList.toggle("hidden", treffer.length > 0 || S.ansicht !== "liste");
+
+  if(S.ansicht === "liste"){
+    liste.classList.remove("hidden");
+    el("map").classList.add("hidden");
+    liste.innerHTML = treffer.map(karteZeile).join("");
+    requestAnimationFrame(() => {
+      liste.querySelectorAll(".gauge__fill").forEach((n,i) => {
+        setTimeout(() => { n.style.width = n.dataset.w + "%"; }, Math.min(i * 18, 400));
+      });
+    });
+  }else{
+    liste.classList.add("hidden");
+    el("map").classList.remove("hidden");
+    zeichneKarte(treffer);
+  }
+}
+
+/* ---------- Karte: Leaflet erst bei Bedarf laden ---------- */
+function ladeLeaflet(){
+  if(window.L) return Promise.resolve(true);
+  return new Promise(res => {
+    const css = document.createElement("link");
+    css.rel = "stylesheet";
+    css.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
+    document.head.appendChild(css);
+    const js = document.createElement("script");
+    js.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
+    js.onload = () => res(true);
+    js.onerror = () => res(false);
+    document.head.appendChild(js);
+  });
+}
+
+async function zeichneKarte(treffer){
+  const ok = await ladeLeaflet();
+  const box = el("map");
+  if(!ok){
+    box.innerHTML = '<div class="state"><h2>Karte nicht verfügbar</h2>' +
+      '<p>Die Kartenbibliothek liess sich nicht laden. Die Liste funktioniert weiter, auch offline.</p></div>';
+    return;
+  }
+  if(!S.karte){
+    S.karte = L.map(box, { attributionControl:true }).setView([51.2, 10.4], 6);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom:18, attribution:'&copy; OpenStreetMap'
+    }).addTo(S.karte);
+    S.marker = L.layerGroup().addTo(S.karte);
+  }
+  S.marker.clearLayers();
+  const punkte = [];
+  treffer.forEach(s => {
+    if(s.lat == null || s.lon == null) return;
+    const p = bewerte(s);
+    const farbe = s.ampel === "rot" ? "#ff6b4a"
+                : s.ampel === "gelb" ? "#ffbe5a"
+                : p !== null && p < 65 ? "#ffbe5a" : "#35b37e";
+    const mk = L.circleMarker([s.lat, s.lon], {
+      radius:7, color:"#04141f", weight:2, fillColor:farbe, fillOpacity:.92
+    }).bindPopup(
+      `<b>${esc(s.name)}</b><br>${esc(s.gewaesser||"")}<br>` +
+      (p !== null ? `${p}/100 — ${esc(urteil(p))}` : esc(s.einstufung || "keine Einstufung")) +
+      `<br><small>Probe ${fmtDatum(s.probe)}</small>`
+    );
+    S.marker.addLayer(mk);
+    punkte.push([s.lat, s.lon]);
+  });
+  setTimeout(() => {
+    S.karte.invalidateSize();
+    if(punkte.length) S.karte.fitBounds(punkte, { padding:[36,36], maxZoom:11 });
+  }, 60);
+}
+
+/* ============================================================
+   6 — Laden
+   ============================================================ */
+function uebernehmen(d, ausCache){
+  S.daten = d;
+  document.body.dataset.demo = d.demo ? "1" : "0";
+  el("m-stand").textContent = fmtDatum(d.stand);
+  el("m-count").textContent = d.stellen.length.toLocaleString("de-DE");
+  el("m-laender").textContent = new Set(d.stellen.map(s => s.land)).size;
+  fuelleDropdown();
+  zeichne();
+  if(!ausCache && !d.demo) Cache.schreibe(d);
+}
+
+async function start(){
+  const zwischen = Cache.lese();
+  if(zwischen) uebernehmen(zwischen, true);
+
+  try{
+    const r = await fetch("data/badestellen.json", { cache:"no-cache" });
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    if(!d.stellen || !Array.isArray(d.stellen)) throw new Error("Unerwartetes Format");
+    uebernehmen(d, false);
+  }catch(e){
+    if(!S.daten) uebernehmen(demoDaten(), true);
+  }
+}
+
+/* ---------- Ereignisse ---------- */
+el("f-land").addEventListener("change", e => { S.land = e.target.value; zeichne(); });
+
+let tippTimer;
+el("f-suche").addEventListener("input", e => {
+  clearTimeout(tippTimer);
+  const v = e.target.value;
+  tippTimer = setTimeout(() => { S.suche = v; zeichne(); }, 140);
+});
+
+el("v-liste").addEventListener("click", () => setzeAnsicht("liste"));
+el("v-karte").addEventListener("click", () => setzeAnsicht("karte"));
+
+function setzeAnsicht(a){
+  S.ansicht = a;
+  el("v-liste").setAttribute("aria-pressed", String(a === "liste"));
+  el("v-karte").setAttribute("aria-pressed", String(a === "karte"));
+  zeichne();
+}
+
+if("serviceWorker" in navigator){
+  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+}
+
+start();
+</script>
+</body>
+</html>
