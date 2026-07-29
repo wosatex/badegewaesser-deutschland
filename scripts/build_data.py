@@ -29,8 +29,6 @@ Verifikationsstand
 from __future__ import annotations
 
 import argparse
-import csv
-import io
 import json
 import os
 import re
@@ -221,45 +219,68 @@ def konnektor_eea() -> list[dict]:
 # KATEGORIE A — echte Schnittstellen mit Messwerten
 # ==========================================================================
 
-SH_BASIS = "https://opendata.schleswig-holstein.de/collection"
+SH_QUELLEN = {
+    "stammdaten": "https://efi2.schleswig-holstein.de/bg/opendata/v_badegewaesser_odata.csv",
+    "einstufung": "https://efi2.schleswig-holstein.de/bg/opendata/v_einstufung_odata.csv",
+    "messungen": "https://efi2.schleswig-holstein.de/bg/opendata/v_proben_odata.csv",
+}
 
 
-def _sh_csv(name: str) -> list[dict]:
-    """SH liefert ISO-8859-1 mit Pipe als Trenner — nicht das übliche UTF-8/Komma."""
-    r = hole(f"{SH_BASIS}/{name}/aktuell.csv")
+def _sh_zeilen(url: str) -> list[list[str]]:
+    """Rohdaten des Landes: ISO-8859-1, Pipe-getrennt, KEINE Kopfzeile.
+
+    Die CKAN-gehostete Kopie unter opendata.schleswig-holstein.de/collection/…
+    hat beim Archivieren alle Umlaute durch U+FFFD ersetzt (nachgeprüft:
+    Bytefolge EF BF BD an jeder Umlautstelle, unabhängig vom Decoder — die
+    Zeichen sind an der Quelle schon weg). efi2.schleswig-holstein.de ist der
+    Originaldienst des Sozialministeriums dahinter: sauberes ISO-8859-1,
+    Umlaute intakt, tagesaktuell. Kein Anubis-Block auf diesem Pfad."""
+    r = hole(url)
     text = r.content.decode("iso-8859-1", errors="replace")
-    return list(csv.DictReader(io.StringIO(text), delimiter="|", quotechar='"'))
+    return [z.split("|") for z in text.splitlines() if z.strip()]
 
 
 def konnektor_sh() -> list[dict]:
     """
-    [PRUEF] Schleswig-Holstein, ~330 Badestellen.
+    Schleswig-Holstein, ~330 Badestellen.
 
-    ACHTUNG: Das Portal steht hinter Anubis (Proof-of-Work-Bot-Schutz). Die
-    HTML-Seiten liefern "Access Denied"; ob die /collection/*.csv-Endpunkte
-    ausgenommen sind, muss der erste Lauf zeigen. Falls nicht: Betreiber wegen
-    User-Agent-Whitelisting anschreiben (Argument: EU-VO 2023/138, HVD Umwelt).
+    Spaltennamen stehen in keiner der drei CSV-Dateien selbst (keine
+    Kopfzeile), sondern nur in der CKAN-Datensatzbeschreibung
+    (package_show.notes). Reihenfolge Stand Juli 2026, Position für Position
+    an Beispieldaten verifiziert:
 
-    Der Name der Messwert-Collection ist noch nicht bestätigt. Kandidaten:
-    badegewasser-messwerte / badegewasser-untersuchungsergebnisse.
+    Stammdaten (29 Spalten, hier nur die verwendeten mit Index):
+      0 BADEGEWAESSERID  3 ALLGEMEIN_GEBRAEUCHL_NAME  4 GEWAESSERKATEGORIE
+      14 WASSERKOERPERNAME  21 GEMEINDE  24 GEOGR_LAENGE  25 GEOGR_BREITE
+    (Index 1 BADEGEWAESSERNAME ist der amtliche Name in GROSSSCHREIBUNG mit
+    Semikolons, Index 3 der im Alltag gebräuchliche — deshalb Index 3 für die
+    Anzeige.)
+
+    Einstufung (4 Spalten): BADEGEWAESSERID, BEURTEILUNGSZEITRAUM_VON,
+    BEURTEILUNGSZEITRAUM_BIS, EINSTUFUNG_ODER_VORABBEWERTUNG. Mehrere Zeilen
+    je Badestelle (ein Berichtszeitraum pro Zeile) — es zählt die mit dem
+    höchsten BEURTEILUNGSZEITRAUM_BIS.
+
+    Messungen (16 Spalten, verwendet: 0 BADEGEWAESSERID, 8 DATUMMESSUNG,
+    10 ECOLI, 11 INTEST_ENTEROKOKKEN, 12 WASSERTEMP, 14 SICHTTIEFE). Manche
+    Badestellen haben mehrere Messstellen (20 von 330); hier zählt schlicht
+    die zeitlich letzte Messung über alle Messstellen der Badestelle hinweg.
+
+    url wird bewusst nicht gesetzt: Die EEA-Basis liefert bereits einen
+    Deeplink auf die offizielle Landeskarte je Badestelle (…DarstellungBade-
+    stelle.html#bgst=<ID>), der genauer ist als ein pauschaler Themenseiten-
+    Link und sonst von verschmelze() überschrieben würde.
     """
-    stamm = {r["BADEGEWAESSERID"]: r for r in _sh_csv("badegewasser-stammdaten")}
+    stamm = {r[0]: r for r in _sh_zeilen(SH_QUELLEN["stammdaten"]) if r and r[0]}
 
-    einst = {}
-    try:
-        for r in _sh_csv("badegewasser-einstufung"):
-            einst[r["BADEGEWAESSERID"]] = r
-    except Exception:
-        pass
-
-    mess = {}
-    for kandidat in ("badegewasser-messwerte", "badegewasser-untersuchungsergebnisse"):
-        try:
-            for r in _sh_csv(kandidat):
-                mess.setdefault(r["BADEGEWAESSERID"], []).append(r)
-            break
-        except Exception:
+    neuste_einstufung: dict[str, tuple[str, str]] = {}
+    for r in _sh_zeilen(SH_QUELLEN["einstufung"]):
+        if len(r) < 4 or not r[0]:
             continue
+        sid, bis, text = r[0], r[2].strip(), r[3].strip()
+        bisher = neuste_einstufung.get(sid)
+        if not bisher or bis > bisher[0]:
+            neuste_einstufung[sid] = (bis, text)
 
     def zahl(v):
         try:
@@ -267,29 +288,43 @@ def konnektor_sh() -> list[dict]:
         except (TypeError, ValueError):
             return None
 
+    def probedatum(v: str) -> str | None:
+        m = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", v or "")
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
+    neuste_probe: dict[str, tuple[str, list[str]]] = {}
+    for r in _sh_zeilen(SH_QUELLEN["messungen"]):
+        if len(r) < 16 or not r[0]:
+            continue
+        datum = probedatum(r[8])
+        if not datum:
+            continue
+        bisher = neuste_probe.get(r[0])
+        if not bisher or datum > bisher[0]:
+            neuste_probe[r[0]] = (datum, r)
+
     out = []
     for sid, s in stamm.items():
-        letzte = None
-        if sid in mess:
-            letzte = sorted(mess[sid], key=lambda r: r.get("DATUM", ""))[-1]
+        kategorie = s[4].strip()
+        probe = neuste_probe.get(sid)
+        eins = neuste_einstufung.get(sid)
+        ecoli = zahl(probe[1][10]) if probe else None
+        entero = zahl(probe[1][11]) if probe else None
 
-        art = (s.get("BADEGEWAESSERTYP") or "").lower()
         out.append(stelle(
-            "SH", sid, s.get("BADEGEWAESSERNAME") or s.get("KURZNAME") or sid,
-            gewaesser=s.get("GEWAESSERNAME"),
-            ort=s.get("GEMEINDENAME"),
-            typ="kueste" if "küste" in art or "kueste" in art else "binnen",
-            lat=zahl(s.get("GEOGR_BREITE")), lon=zahl(s.get("GEOGR_LAENGE")),
-            vertrauen="berechnet" if letzte else "amtlich",
-            einstufung=(einst.get(sid) or {}).get("EINSTUFUNG"),
-            ampel="unbekannt",
-            probe=(letzte or {}).get("DATUM"),
-            ecoli=zahl((letzte or {}).get("ECOLI")),
-            entero=zahl((letzte or {}).get("ENTEROKOKKEN")),
-            sichttiefe=zahl((letzte or {}).get("SICHTTIEFE")),
-            temperatur=zahl((letzte or {}).get("WASSERTEMPERATUR")),
-            url="https://www.schleswig-holstein.de/DE/landesregierung/themen/"
-                "gesundheit-verbraucherschutz/badegewaesserqualitaet",
+            "SH", sid, s[3].strip() or s[1].strip() or s[2].strip() or sid,
+            gewaesser=s[14].strip() or None,
+            ort=s[21].strip() or None,
+            typ="kueste" if kategorie in ("Küstengewässer", "Übergangsgewässer") else "binnen",
+            lat=zahl(s[25]), lon=zahl(s[24]),
+            vertrauen="berechnet" if (ecoli is not None and entero is not None)
+                      else ("amtlich" if eins else "jahresnote"),
+            einstufung=eins[1] if eins else None,
+            ampel=einstufung_ampel(eins[1] if eins else None),
+            probe=probe[0] if probe else None,
+            ecoli=ecoli, entero=entero,
+            temperatur=zahl(probe[1][12]) if probe else None,
+            sichttiefe=zahl(probe[1][14]) if probe else None,
         ))
     return out
 
