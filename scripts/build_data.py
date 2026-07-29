@@ -1001,18 +1001,174 @@ def konnektor_bw() -> list[dict]:
     return out
 
 
+NW_BASIS = "https://db.badegewaesser.nrw.de/badegewaesser-nrw"
+
+# Generische Wörter, die beim Namensabgleich gegen die EEA-Basis ignoriert
+# werden (siehe konnektor_nw). "STEG"/"BUCHT" bewusst NICHT hier, die sind in
+# NRW oft der einzige unterscheidende Teil zwischen zwei Messstellen desselben
+# Sees.
+NW_STOPWOERTER = {"BADESTELLE", "STRANDBAD", "FREIBAD", "SEE", "BADESEE", "STRAND", "AM"}
+
+
+def _nw_dt(pfad: str, spalten: list[str], **extra) -> list[dict]:
+    """Die Spring-Roo-DataTables-Endpunkte brauchen den vollen DataTables-
+    Parametersatz (columns[i][name]/[searchable]/[orderable]/[search]…) -
+    mit nur outFields+length kommt ein 400/500 zurück, das musste ausprobiert
+    werden (kein Parameter davon ist offensichtlich Pflicht laut Doku, weil
+    es keine gibt)."""
+    params = {"draw": 1, "start": 0, "length": -1,
+              "search[value]": "", "search[regex]": "false",
+              "order[0][column]": 0, "order[0][dir]": "asc"}
+    for i, spalte in enumerate(spalten):
+        params[f"columns[{i}][data]"] = spalte
+        params[f"columns[{i}][name]"] = ""
+        params[f"columns[{i}][searchable]"] = "true"
+        params[f"columns[{i}][orderable]"] = "true"
+        params[f"columns[{i}][search][value]"] = ""
+        params[f"columns[{i}][search][regex]"] = "false"
+    params.update(extra)
+    r = hole(f"{NW_BASIS}/{pfad}", params=params)
+    return r.json().get("data", [])
+
+
 def konnektor_nw() -> list[dict]:
     """
-    [TODO] db.badegewaesser.nrw.de/badegewaesser-nrw/ (LANUK).
-    85 EU-Badegewässer mit 111 Badestellen, aktuelle und historische Messwerte
-    je Messstelle. Die Tabellenansicht ist der beste Ansatzpunkt.
+    Nordrhein-Westfalen, 116 Messstellen. Kein FeatureServer, sondern eine
+    Spring-Roo-App mit serverseitigem DataTables-JSON unter .../dt (Felder:
+    id, badegewaesser, idAndMessstelle="<id>µ<Messstelle>", kreis, gemeinde,
+    gueteImage mit dem Einstufungstext im title-Attribut). Pro Stelle liegen
+    die Messwerte unter .../<id>/probenahmeMesswertInternets/dt?jahrDiff=0
+    (Felder datumProbenahme, ecWithHinweis, ieWithHinweis, wassertemperatur,
+    sichttiefe, badeverbotUI).
 
-    WICHTIG: NRW löst an Flussbadestellen bei einer Tagesniederschlagssumme
-    über 5 mm/d automatisch ein Badeverbot aus. Dieses Frühwarn-Flag unbedingt
-    als hinweise=[{"art":"warnung",...}] mitführen — es ändert sich zwischen
-    zwei Beprobungen und ist der einzige tagesaktuelle Wert im Land.
+    WICHTIG: NRW löst an Flussbadestellen bei >5 mm Tagesniederschlag
+    automatisch ein Badeverbot aus - badeverbotUI ist NRWs eigenes Ergebnis
+    dieser Regel (und aller anderen Sperrgründe), eigene Niederschlagslogik
+    ist nicht nötig. Aber: das Feld ist nur ein UI-Flag ("X" oder leer),
+    keine Begründung im Klartext - getestet an einem echten Fall (Escher
+    Badesee, 16.06.2026). hinweise bekommt deshalb ein neutrales Label statt
+    einer erfundenen Ursache; der Grund steht im Steckbrief hinter url=.
+
+    Keine ID im Datensatz entspricht der EEA-ID (die lokale "id" ist 1..n in
+    Eingabereihenfolge, nicht die BADEGEWAESSERID). Zuordnung über
+    Namensabgleich wie bei BE, aber hier bewusst KONSERVATIV: nur eindeutige
+    Treffer mit echtem Kern-Token-Überlapp (>0 und klar vor der zweitbesten
+    Kandidatin) werden gemerged. Getestet: 109 von 116 eindeutig, 7 ohne
+    verlässlichen Treffer (z.B. "Nievenheimer See", das lokal keinen
+    passenden EEA-Namen hat) - die bleiben bewusst bei der EEA-Jahresnote,
+    statt eine Badeverbot-Warnung an die falsche Stelle zu hängen. Das ist
+    hier sicherheitsrelevant, ein Fehlmatch wäre schlimmer als eine Lücke.
     """
-    raise NotImplementedError("Tabellenansicht auswerten")
+    zeilen = _nw_dt("dt", ["id", "badegewaesser", "idAndMessstelle", "kreis", "gemeinde", "gueteImage"])
+    if len(zeilen) < 50:
+        raise ValueError(f"NW: nur {len(zeilen)} Messstellen in der Liste gefunden")
+
+    service = _eea_service_url()
+    layer_id = _eea_find_point_layer(service)
+    r = hole(f"{service}/{layer_id}/query", params={
+        "where": "countryCode='DE' AND bathingWaterIdentifier LIKE 'DENW%'",
+        "outFields": "bathingWaterIdentifier,bathingWaterName",
+        "returnGeometry": "false", "f": "json", "resultRecordCount": 200,
+    })
+    kandidaten = [(a["bathingWaterIdentifier"], a["bathingWaterName"])
+                  for a in (f["attributes"] for f in r.json().get("features", []))]
+
+    def kern_und_alle(name: str) -> tuple[set, set]:
+        alle = _normalisiere(name)
+        return (alle - NW_STOPWOERTER or alle), alle
+
+    def finde_id(name: str):
+        kern_ziel, alle_ziel = kern_und_alle(name)
+        bewertet = []
+        for eid, ename in kandidaten:
+            kern_k, alle_k = kern_und_alle(ename)
+            bewertet.append(((len(kern_ziel & kern_k), len(alle_ziel & alle_k)), eid))
+        bewertet.sort(reverse=True)
+        (bester_kern, _), best_id = bewertet[0]
+        (zweiter_kern, _), _ = bewertet[1]
+        if bester_kern > 0 and bester_kern > zweiter_kern:
+            return best_id
+        return None
+
+    def zahl(v):
+        try:
+            return float(str(v).replace(",", ".").replace("<", "").replace(">", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    def probedatum(v: str) -> str | None:
+        m = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", v or "")
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
+    out = []
+    for i, row in enumerate(zeilen):
+        if i:
+            time.sleep(0.3)
+        sid_lokal = row.get("id")
+        teile = (row.get("idAndMessstelle") or "").split("µ", 1)
+        messstelle = teile[1] if len(teile) > 1 else ""
+        name = f"{row.get('badegewaesser', '')} {messstelle}".strip()
+        if not sid_lokal or not name:
+            continue
+
+        eu_id = finde_id(name)
+        if not eu_id:
+            continue
+
+        einstufung = None
+        m = re.search(r'title="([^"]+)"', row.get("gueteImage") or "")
+        if m:
+            einstufung = m.group(1)
+
+        messwerte_zeilen = _nw_dt(
+            f"{sid_lokal}/probenahmeMesswertInternets/dt",
+            ["datumProbenahme", "ecWithHinweis", "ieWithHinweis",
+             "wassertemperatur", "sichttiefe", "badeverbotUI"],
+            jahrDiff=0)
+        if not messwerte_zeilen:
+            time.sleep(0.3)
+            messwerte_zeilen = _nw_dt(
+                f"{sid_lokal}/probenahmeMesswertInternets/dt",
+                ["datumProbenahme", "ecWithHinweis", "ieWithHinweis",
+                 "wassertemperatur", "sichttiefe", "badeverbotUI"],
+                jahrDiff=1)
+
+        letzte = None
+        if messwerte_zeilen:
+            letzte = max(messwerte_zeilen, key=lambda z: probedatum(z.get("datumProbenahme")) or "")
+
+        ecoli = zahl((letzte or {}).get("ecWithHinweis"))
+        entero = zahl((letzte or {}).get("ieWithHinweis"))
+
+        hinweise = []
+        if ((letzte or {}).get("badeverbotUI") or "").strip():
+            # badeverbotUI ist nur ein UI-Flag ("X" oder leer), kein Fließtext -
+            # geprüft an einem echten Fall (16.06.2026, Escher Badesee). Der
+            # Grund (Regen an Flussbadestellen, Blaualgen, Keimbelastung, …)
+            # steht nicht im Feld selbst - keine Ursache erfinden, nur auf
+            # den Verweislink zeigen.
+            hinweise.append({
+                "art": "warnung",
+                "text": "Aktuelles Badeverbot (Grund siehe Verweislink)",
+            })
+
+        out.append(stelle(
+            "NW", eu_id, name,
+            gewaesser=row.get("badegewaesser"), ort=row.get("gemeinde"),
+            vertrauen="berechnet" if (ecoli is not None and entero is not None) else "jahresnote",
+            einstufung=einstufung,
+            ampel=einstufung_ampel(einstufung),
+            probe=probedatum((letzte or {}).get("datumProbenahme")),
+            ecoli=ecoli, entero=entero,
+            temperatur=zahl((letzte or {}).get("wassertemperatur")),
+            sichttiefe=zahl((letzte or {}).get("sichttiefe")),
+            hinweise=hinweise,
+            url=f"{NW_BASIS}/{sid_lokal}/",
+        ))
+
+    if len(out) < 50:
+        raise ValueError(f"NW: nur {len(out)} Stellen zusammengebaut")
+    return out
 
 
 NI_BASIS = "https://www.apps.nlga.niedersachsen.de/batlas/index.php"
